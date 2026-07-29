@@ -1,0 +1,23 @@
+{
+  "name": "emodal-lbct-connector",
+  "version": "1.0.0",
+  "description": "Standalone Node.js Connector for EModal (OAuth2 PKCE) + LBCT (2Captcha reCAPTCHA v2) — deployed on Render/Railway to avoid WAF/rate-limiting on Cloudflare Workers",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "dotenv -e .env node server.js",
+    "check": "node --check server.js && node --check 2captcha.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "undici": "^6.0.0"
+  },
+  "devDependencies": {
+    "dotenv-cli": "^7.4.2"
+  }
+}
