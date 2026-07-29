@@ -1739,12 +1739,15 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// API Key 安全验证
+// API Key 安全验证（支持 x-api-key 和 X-Connector-API-Key 两种 header）
 const API_KEY = process.env.CONNECTOR_API_KEY || '';
 app.use(function(req, res, next) {
   if (req.path === '/health') return next();
-  if (API_KEY && req.headers['x-api-key'] !== API_KEY) {
-    return res.status(403).json({ error: 'unauthorized: invalid or missing API key' });
+  if (API_KEY) {
+    var key = req.headers['x-api-key'] || req.headers['x-connector-api-key'] || '';
+    if (key !== API_KEY) {
+      return res.status(403).json({ error: 'unauthorized: invalid or missing API key' });
+    }
   }
   next();
 });
