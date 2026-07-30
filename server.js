@@ -2077,6 +2077,43 @@ app.get('/lbct/balance', async function(req, res) {
   }
 });
 
+// L3: 诊断端点 - 逐步测试 LBCT 登录流程
+app.get('/lbct/diagnose', async function(req, res) {
+  var results = {};
+  try {
+    // Step 0: 测试基础连通性
+    try {
+      var r0 = await fetch("https://portal.lbct.com/ViewMyList", { method: "GET", redirect: "manual", headers: {"User-Agent": "Mozilla/5.0"} });
+      results.step0 = { ok: true, status: r0.status };
+    } catch(e0) {
+      results.step0 = { ok: false, error: e0.message, stack: e0.stack, cause: e0.cause ? e0.cause.message : null };
+    }
+
+    // Step 1: 获取登录页
+    try {
+      var r1 = await fetch("https://portal.lbct.com/LoginWithUrl/MyList", { method: "GET", redirect: "manual", headers: {"User-Agent": "Mozilla/5.0"} });
+      var html1 = await r1.text();
+      results.step1 = { ok: true, status: r1.status, html_len: html1.length, hasSitekey: html1.indexOf("data-sitekey") !== -1 };
+    } catch(e1) {
+      results.step1 = { ok: false, error: e1.message, stack: e1.stack, cause: e1.cause ? e1.cause.message : null };
+    }
+
+    // Step 2: 测试 2Captcha API
+    if (twoCaptcha) {
+      try {
+        var bal = await twoCaptcha.getBalance();
+        results.step2 = { ok: true, balance: bal };
+      } catch(e2) {
+        results.step2 = { ok: false, error: e2.message };
+      }
+    }
+
+    res.json({ success: true, results: results });
+  } catch (e) {
+    res.status(500).json({ success:false, error: e.message || String(e), results: results });
+  }
+});
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, function() {
   console.log('EModal Connector running on port ' + PORT);
