@@ -2253,12 +2253,23 @@ app.post('/lbct/slots', async function(req, res) {
   var container = req.body && req.body.container;
   var date = req.body && req.body.date;
   var bookingType = (req.body && req.body.bookingType) || "DI";
+  var debug = req.body && req.body.debug;  // 调试模式：返回原始响应
   if (!username || !password) return res.status(400).json({ error: 'username and password required' });
   if (!container || !date) return res.status(400).json({ error: 'container and date required' });
   try {
     var client = await getValidLbctClient(username, password, false);
     var map;
+    var rawResponse = null;
     try {
+      if (debug) {
+        // 调试模式：直接调用LBCT API获取原始响应
+        var plaintext = "cntrId:" + container + ",transactionType:" + bookingType + ",equTypeVal:,lineOperVal:,bookingNumber:";
+        var encrypted = await lbctEncrypt(plaintext);
+        var customHeaders = { "X-Requested-With": "XMLHttpRequest", "Accept": "application/json, text/javascript, */*; q=0.01" };
+        rawResponse = await client.call("POST", "/Appointments/getAppointmentTimeSlotWidthId", { enc: encrypted }, "json", customHeaders);
+        console.log("[LBCT DEBUG] raw response type:", typeof rawResponse);
+        console.log("[LBCT DEBUG] raw response preview:", JSON.stringify(rawResponse).substring(0, 1000));
+      }
       map = await client.getSlotsByDate(date, container, bookingType);
     } catch (e) {
       if (e && (e.code === 401 || (e.message && e.message.indexOf("cookie_expired") !== -1))) {
@@ -2266,10 +2277,18 @@ app.post('/lbct/slots', async function(req, res) {
         map = await client.getSlotsByDate(date, container, bookingType);
       } else throw e;
     }
-    res.json({ success: true, slots: map, container: container, date: date, bookingType: bookingType });
+    var resp = { success: true, slots: map, container: container, date: date, bookingType: bookingType, slotCount: Object.keys(map || {}).length };
+    if (debug && rawResponse !== null) {
+      resp.debug = {
+        rawResponseType: typeof rawResponse,
+        rawResponsePreview: typeof rawResponse === "string" ? rawResponse.substring(0, 2000) : JSON.stringify(rawResponse).substring(0, 2000),
+        rawResponseFull: rawResponse
+      };
+    }
+    res.json(resp);
   } catch (e) {
     var code = (e && e.code) || 500;
-    res.status(code).json({ error: e.message || String(e) });
+    res.status(code).json({ error: e.message || String(e), stack: e.stack ? e.stack.split("\n").slice(0, 5).join(" | ") : "" });
   }
 });
 
