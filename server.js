@@ -2427,7 +2427,7 @@ app.get('/lbct/diagnose', async function(req, res) {
 const PORT = process.env.PORT || 3000;
 
 // ====== LBCT Proxy Endpoints (for Worker → LBCT API) ======
-const https = require('https');
+// 注意: https 模块已在文件顶部 require，这里不再重复声明
 
 // LBCT Proxy - 代理 LBCT API 请求（绕过 Cloudflare SSL 限制）
 app.post('/lbct/proxy', async function(req, res) {
