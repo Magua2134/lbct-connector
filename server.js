@@ -1370,6 +1370,98 @@ const lbctCookieCache = new Map();
 const LBCT_COOKIE_TTL = 7 * 60 * 60 * 1000; // 7小时 (LBCT 约 8 小时过期，提前1小时换)
 
 // ============================================
+// LBCT 2Captcha 登录熔断机制
+// 避免码头维护期间浪费大量2Captcha额度
+// ============================================
+/*
+ * 熔断策略：
+ * 1. 连续失败次数 ≥ 3次  → 冷却 5 分钟 (短冷却)
+ * 2. 连续失败次数 ≥ 5次  → 冷却 30 分钟 (中冷却)
+ * 3. 连续失败次数 ≥ 8次  → 冷却 2 小时 (长冷却)
+ * 4. 检测到码头维护信号 (503/HTML页面/特定维护关键词) → 立即冷却1小时
+ * 5. 每次登录成功 → 重置失败计数
+ */
+const lbctLoginCircuit = new Map(); // Map<username, {failCount, cooldownUntil, lastError, maintenanceFlag}>
+
+function getCircuitBreakerState(username) {
+  if (!username) return { active: false, failCount: 0, cooldownMs: 0 };
+  var cb = lbctLoginCircuit.get(username) || { failCount: 0, cooldownUntil: 0, lastError: "", maintenanceFlag: false };
+  var now = Date.now();
+  if (cb.cooldownUntil > now) {
+    return {
+      active: true,
+      failCount: cb.failCount,
+      cooldownMs: cb.cooldownUntil - now,
+      cooldownUntil: cb.cooldownUntil,
+      lastError: cb.lastError,
+      maintenanceFlag: cb.maintenanceFlag
+    };
+  }
+  // 冷却期过了，但如果之前是维护熔断，还需要等一会才恢复（避免立即重试又失败）
+  if (cb.maintenanceFlag && cb.cooldownUntil <= now && cb.cooldownUntil > 0) {
+    // 维护熔断刚结束：先把failCount降到低水平，允许再试1-2次
+    cb.failCount = Math.min(cb.failCount, 3);
+    lbctLoginCircuit.set(username, cb);
+  }
+  return { active: false, failCount: cb.failCount, lastError: cb.lastError, maintenanceFlag: cb.maintenanceFlag };
+}
+
+function recordLoginFailure(username, errorMsg) {
+  if (!username) return;
+  var cb = lbctLoginCircuit.get(username) || { failCount: 0, cooldownUntil: 0, lastError: "", maintenanceFlag: false };
+  cb.failCount = (cb.failCount || 0) + 1;
+  cb.lastError = errorMsg || "";
+
+  // 检测维护信号
+  var isMaintenance = false;
+  var lowErr = (errorMsg || "").toLowerCase();
+  var maintenanceKeywords = ["maintenance", "undergoing", "503", "service unavailable", "unavailable", "scheduled", "downtime", "website down", "web server is down", "origin_down", "error 521", "gateway timeout", "502", "504"];
+  for (var i = 0; i < maintenanceKeywords.length; i++) {
+    if (lowErr.indexOf(maintenanceKeywords[i]) !== -1) { isMaintenance = true; break; }
+  }
+  // 如果返回HTML页面（非JSON），也认为可能是维护
+  if (lowErr.indexOf("<!doctype") !== -1 || lowErr.indexOf("<html") !== -1) {
+    isMaintenance = true;
+  }
+  cb.maintenanceFlag = isMaintenance || cb.maintenanceFlag;
+
+  // 计算冷却时间
+  var cooldownMs = 0;
+  if (isMaintenance) {
+    cooldownMs = 60 * 60 * 1000; // 维护：1小时冷却
+  } else if (cb.failCount >= 8) {
+    cooldownMs = 2 * 60 * 60 * 1000; // ≥8次失败：2小时冷却
+  } else if (cb.failCount >= 5) {
+    cooldownMs = 30 * 60 * 1000; // ≥5次失败：30分钟冷却
+  } else if (cb.failCount >= 3) {
+    cooldownMs = 5 * 60 * 1000; // ≥3次失败：5分钟冷却
+  }
+  if (cooldownMs > 0) {
+    cb.cooldownUntil = Date.now() + cooldownMs;
+  }
+  lbctLoginCircuit.set(username, cb);
+
+  console.log("[LBCT-CIRCUIT] FAIL #" + cb.failCount + " user=" + username + " maintenance=" + isMaintenance + " cooldown=" + Math.round(cooldownMs / 1000) + "s error=" + (errorMsg || "").substring(0, 100));
+  return { failCount: cb.failCount, cooldownMs: cooldownMs, maintenanceFlag: isMaintenance };
+}
+
+function recordLoginSuccess(username) {
+  if (!username) return;
+  lbctLoginCircuit.set(username, { failCount: 0, cooldownUntil: 0, lastError: "", maintenanceFlag: false });
+  console.log("[LBCT-CIRCUIT] SUCCESS login reset, user=" + username);
+}
+
+function checkCircuitBreaker(username) {
+  var state = getCircuitBreakerState(username);
+  if (state.active) {
+    var min = Math.ceil(state.cooldownMs / 60000);
+    var reason = state.maintenanceFlag ? "码头维护中" : "连续登录失败" + state.failCount + "次";
+    throw new Error("circuit_breaker: " + reason + "，" + min + "分钟后再试（最近错误：" + (state.lastError || "unknown").substring(0, 80) + "）");
+  }
+  return state;
+}
+
+// ============================================
 // Cookie 工具函数
 // ============================================
 function mergeCookies(existingCookieStr, newSetCookie) {
@@ -1983,7 +2075,8 @@ async function getValidLbctClient(username, password, force) {
   if (!username || !password) throw new Error("username and password required");
   if (!twoCaptcha) throw new Error("2Captcha not configured. Set TWOCAPTCHA_API_KEY env var.");
 
-  // 查缓存
+  // ============== 第一步：优先用缓存（不消耗2Captcha额度）==============
+  // 只要有缓存且有效，绝不重新登录
   if (!force) {
     var cached = lbctCookieCache.get(username);
     if (cached && cached.expiresAt > Date.now()) {
@@ -2002,13 +2095,29 @@ async function getValidLbctClient(username, password, force) {
     lbctCookieCache.delete(username);
   }
 
-  // 需要重新登录
-  console.log("[LBCT] Auto-login for user:", username);
-  var loginResult = await LBCTClientConnector.loginWithCredentials(username, password, twoCaptcha);
-  if (!loginResult.success) {
-    throw new Error("LBCT login failed: " + (loginResult.error || "unknown"));
+  // ============== 第二步：熔断检查（如果维护中/连续失败多次，直接拒绝登录）==============
+  // 注意：只有缓存失效需要重新登录时才检查熔断
+  var cbState = checkCircuitBreaker(username);
+
+  // ============== 第三步：需要重新登录（消耗1次2Captcha额度）==============
+  console.log("[LBCT] Auto-login for user: " + username + " (2Captcha consumed, failCount=" + cbState.failCount + ")");
+  var loginResult;
+  try {
+    loginResult = await LBCTClientConnector.loginWithCredentials(username, password, twoCaptcha);
+  } catch(e) {
+    // 登录异常（网络错误/维护等）
+    recordLoginFailure(username, e.message || String(e));
+    throw e;
   }
-  // 写缓存
+  if (!loginResult.success) {
+    // 登录失败（2Captcha错误/账号密码错误/LBCT返回错误）
+    var errMsg = loginResult.error || "unknown";
+    recordLoginFailure(username, errMsg);
+    throw new Error("LBCT login failed: " + errMsg);
+  }
+  // 登录成功 → 重置失败计数
+  recordLoginSuccess(username);
+  // 写缓存（7小时有效，期间不用再登录）
   lbctCookieCache.set(username, {
     cookieStr: loginResult.cookie,
     csrfToken: loginResult.csrfToken,
@@ -2447,6 +2556,49 @@ app.get('/lbct/balance', async function(req, res) {
   } catch (e) {
     res.status(500).json({ success:false, error: e.message || String(e) });
   }
+});
+
+// L7: 熔断状态查看 (查看当前账号的熔断状态)
+app.get('/lbct/circuit', async function(req, res) {
+  var username = req.query.username || "";
+  var result = {};
+  if (username) {
+    result[username] = getCircuitBreakerState(username);
+  } else {
+    // 无username时，只显示有熔断记录的账号（不含密码）
+    var allKeys = lbctLoginCircuit.keys();
+    for (var k of allKeys) {
+      result[k] = getCircuitBreakerState(k);
+    }
+  }
+  // 显示缓存中的账号数量
+  result._cacheStats = {
+    totalCached: lbctCookieCache.size,
+    totalCircuits: lbctLoginCircuit.size,
+    cookies: Array.from(lbctCookieCache.keys()).map(function(k) {
+      var c = lbctCookieCache.get(k);
+      return { username: k, expiresAt: c ? c.expiresAt : 0, hoursLeft: c ? Math.round((c.expiresAt - Date.now()) / 3600000 * 10) / 10 : 0 };
+    })
+  };
+  res.json({ success: true, circuit: result });
+});
+
+// L8: 熔断重置（强制清除某个账号的熔断状态，允许重新登录）
+app.post('/lbct/circuit/reset', async function(req, res) {
+  var username = req.body && req.body.username;
+  var apiKey = req.headers["x-api-key"] || req.body && req.body.apiKey;
+  var expectedKey = process.env.EMODAL_CONNECTOR_API_KEY || "";
+  // 简单保护：需要提供正确的apiKey或者正确的EMODAL_CONNECTOR_API_KEY环境变量为空（开发环境）
+  if (expectedKey && apiKey !== expectedKey) {
+    return res.status(403).json({ success: false, error: "Invalid API key" });
+  }
+  if (!username) {
+    // 重置所有账号
+    lbctLoginCircuit.clear();
+    return res.json({ success: true, message: "All circuits reset" });
+  }
+  lbctLoginCircuit.delete(username);
+  res.json({ success: true, message: "Circuit reset for user: " + username });
 });
 
 // L3: 诊断端点 - 逐步测试 LBCT 登录流程
