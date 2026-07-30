@@ -13,6 +13,7 @@ console.log('[TLS] NODE_TLS_REJECT_UNAUTHORIZED=0 (SSL certificate verification 
 
 const express = require('express');
 const cors = require('cors');
+const https = require('https');
 
 // 2Captcha 客户端 (用于 LBCT reCAPTCHA v2 自动打码)
 const { TwoCaptchaClient } = require('./2captcha');
@@ -1515,6 +1516,66 @@ class LBCTClientConnector {
     return m ? m[1] : "";
   }
 
+  // 解析日期格式 - 返回 MM/DD/YYYY 格式
+  parseDate(dateStr) {
+    if (!dateStr) return "";
+    if (typeof dateStr === "object" && dateStr !== null) {
+      var year = dateStr.Year || dateStr.year || (dateStr.getFullYear ? dateStr.getFullYear() : 0);
+      var month = dateStr.Month || dateStr.month || (dateStr.getMonth ? dateStr.getMonth() + 1 : 0);
+      var day = dateStr.Day || dateStr.day || (dateStr.getDate ? dateStr.getDate() : 0);
+      if (year > 2000 && year < 2100 && month >= 1 && month <= 12 && day >= 1 && day <= 31) {
+        return String(month).padStart(2, "0") + "/" + String(day).padStart(2, "0") + "/" + year;
+      }
+      return "";
+    }
+    var str = String(dateStr);
+    var dateMatch = str.match(/\/Date\((-?\d+)\)/);
+    if (dateMatch) {
+      var ts = parseInt(dateMatch[1]);
+      if (ts > 0) {
+        var d = new Date(ts);
+        var y = d.getUTCFullYear();
+        if (y >= 2000 && y <= 2100) {
+          return String(d.getUTCMonth() + 1).padStart(2, "0") + "/" + String(d.getUTCDate()).padStart(2, "0") + "/" + y;
+        }
+      }
+      return "";
+    }
+    var isoMatch = str.match(/^(\d{4})-(\d{1,2})-(\d{1,2})[ T]/);
+    if (isoMatch) {
+      return String(parseInt(isoMatch[2])).padStart(2, "0") + "/" + String(parseInt(isoMatch[3])).padStart(2, "0") + "/" + isoMatch[1];
+    }
+    var mm = str.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})/);
+    if (mm) {
+      return String(parseInt(mm[1])).padStart(2, "0") + "/" + String(parseInt(mm[2])).padStart(2, "0") + "/" + mm[3];
+    }
+    return "";
+  }
+
+  // 从 StartDate 字段提取时间 HH:MM
+  extractTimeFromStartDate(slotObj) {
+    if (!slotObj || typeof slotObj !== "object") return null;
+    var start = slotObj.StartDate || slotObj.startDate;
+    if (!start) return null;
+    if (typeof start === "object") {
+      var h = start.Hour !== undefined ? start.Hour : (start.hour !== undefined ? start.hour : -1);
+      var m = start.Minute !== undefined ? start.Minute : (start.minute !== undefined ? start.minute : -1);
+      if (h >= 0 && h < 24 && m >= 0 && m < 60) {
+        return String(h).padStart(2, "0") + ":" + String(m).padStart(2, "0");
+      }
+      return null;
+    }
+    var s = String(start);
+    var tsMatch = s.match(/\/Date\((-?\d+)\)/);
+    if (tsMatch) {
+      var d = new Date(parseInt(tsMatch[1]));
+      return String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0");
+    }
+    var t = s.match(/[ T](\d{1,2}):(\d{2})/);
+    if (t) return String(parseInt(t[1])).padStart(2, "0") + ":" + t[2];
+    return null;
+  }
+
   // ================ 自动登录 (2Captcha) ================
   static async loginWithCredentials(username, password, captchaClient, options) {
     options = options || {};
@@ -1655,30 +1716,117 @@ class LBCTClientConnector {
     try {
       var plaintext = "cntrId:" + container + ",transactionType:" + bookingType + ",equTypeVal:,lineOperVal:,bookingNumber:";
       var encrypted = await lbctEncrypt(plaintext);
-      var result = await this.call("POST", "/Appointments/getAppointmentTimeSlotWidthId", { enc: encrypted });
+      // 添加 X-Requested-With 头 (AJAX 必需)
+      var customHeaders = { "X-Requested-With": "XMLHttpRequest", "Accept": "application/json, text/javascript, */*; q=0.01" };
+      var result = await this.call("POST", "/Appointments/getAppointmentTimeSlotWidthId", { enc: encrypted }, "json", customHeaders);
+
+      // 检查 LBCT API 返回的错误信息
+      if (result && result.errorMsg) {
+        console.error("[LBCT] getSlotsByDate API errorMsg:", result.errorMsg);
+        throw new Error("LBCT API 错误: " + result.errorMsg);
+      }
+
+      console.log("[LBCT] response type:", typeof result, "keys:", result && typeof result === "object" ? Object.keys(result).slice(0, 10) : "N/A");
+
       var slots = [];
       if (Array.isArray(result)) slots = result;
       else if (result && result.data && Array.isArray(result.data)) slots = result.data;
-      else if (result && Array.isArray(result.Slots)) slots = result.Slots;
+      else if (result && result.Data && Array.isArray(result.Data)) slots = result.Data;
+      else if (result && result.Slots && Array.isArray(result.Slots)) slots = result.Slots;
+      else if (result && result.slots && Array.isArray(result.slots)) slots = result.slots;
+      else if (result && result.timeSlots && Array.isArray(result.timeSlots)) slots = result.timeSlots;
+      else if (result && result.TimeSlots && Array.isArray(result.TimeSlots)) slots = result.TimeSlots;
+      else if (result && result.Data && typeof result.Data === "object") {
+        if (result.Data.Slots && Array.isArray(result.Data.Slots)) slots = result.Data.Slots;
+        else if (result.Data.slots && Array.isArray(result.Data.slots)) slots = result.Data.slots;
+        else slots = [result.Data];
+      }
+      // LBCT 可能返回单对象，需要包装成数组
+      else if (result && typeof result === "object" && result.StartDate) {
+        slots = [result];
+      }
+      // 最后兜底：如果 result 是对象但不是数组，尝试作为单条记录
+      else if (result && typeof result === "object" && !Array.isArray(result)) {
+        var found = false;
+        for (var key in result) {
+          if (Array.isArray(result[key]) && result[key].length > 0) {
+            slots = result[key];
+            console.log("[LBCT] found slots array in result[" + key + "], length:", slots.length);
+            found = true;
+            break;
+          }
+        }
+        if (!found && result.StartDate) slots = [result];
+      }
+
+      console.log("[LBCT] slots count after parse:", slots.length);
+      if (slots.length > 0) {
+        console.log("[LBCT] first slot keys:", Object.keys(slots[0]));
+        console.log("[LBCT] first slot:", JSON.stringify(slots[0]).substring(0, 400));
+      }
+
+      // 归一化目标日期（确保是 MM/DD/YYYY 格式）
+      var ntp = String(targetDate).split("/");
+      var normalizedTargetDate = String(targetDate);
+      if (ntp.length === 3) normalizedTargetDate = String(parseInt(ntp[0])).padStart(2, "0") + "/" + String(parseInt(ntp[1])).padStart(2, "0") + "/" + ntp[2];
+
       var slotMap = {};
+      var skippedByDate = 0;
+      var skippedByTime = 0;
+      var skippedByOpenings = 0;
+
       for (var i = 0; i < slots.length; i++) {
         var s = slots[i];
+        var openings = s.Openings !== undefined ? s.Openings : (s.openings !== undefined ? s.openings : -1);
+        if (openings === 0) { skippedByOpenings++; if (i < 5) console.log("[LBCT] slot[" + i + "] skipped: Openings=0"); continue; }
+
         var slotName = s.Slot || s.slot || s.SlotName || s.Name || s.TimeSlot || "";
-        var fakeId = s.FakeId || s.fakeId || s.FakeID || "";
-        var quotaRuleGkey = s.QuotaRuleGkey || s.quotaRuleGkey || "";
-        var slotDate = s.Date || s.date || s.ApptDate || "";
-        if (slotDate) {
-          var fd = slotDate;
-          if (fd.indexOf("-") !== -1) {
-            var dp = fd.split("-"); if (dp.length===3) fd = dp[1]+"/"+dp[2]+"/"+dp[0];
+        var fakeId = s.FakeId || s.fakeId || s.FakeID || s.Id || s.id || "";
+        var quotaRuleGkey = s.QuotaRuleGkey || s.quotaRuleGkey || s.QuotaRuleGKey || s.gkey || "";
+        var slotDate = s.Date || s.date || s.ApptDate || s.StartDate || s.startDate || "";
+
+        var formattedDate = "";
+        if (slotDate) formattedDate = this.parseDate(slotDate);
+
+        if (formattedDate && normalizedTargetDate && formattedDate !== normalizedTargetDate) {
+          // 归一化比较: 7/30/2026 vs 07/30/2026
+          var f2 = formattedDate.replace(/^(\d)\//, "0$1/");
+          var t2 = normalizedTargetDate.replace(/^(\d)\//, "0$1/");
+          if (f2 !== t2) {
+            skippedByDate++;
+            if (i < 5) console.log("[LBCT] slot[" + i + "] skipped: date mismatch", normalizedTargetDate, "vs", formattedDate);
+            continue;
           }
-          if (fd !== targetDate) continue;
         }
+
         var tk = extractTime(slotName);
-        if (tk) slotMap[tk] = { slot: slotName, time: tk, fakeId: String(fakeId), quotaRuleGkey: String(quotaRuleGkey), date: slotDate || targetDate };
+        if (!tk) tk = this.extractTimeFromStartDate(s);
+
+        if (tk) {
+          if (i < 5) console.log("[LBCT] slot[" + i + "] match: time=" + tk + ", openings=" + openings + ", fakeId=" + String(fakeId).substring(0, 20));
+          slotMap[tk] = {
+            slot: slotName,
+            time: tk,
+            fakeId: String(fakeId),
+            quotaRuleGkey: String(quotaRuleGkey),
+            date: formattedDate || slotDate || targetDate,
+            openings: openings
+          };
+        } else {
+          skippedByTime++;
+          if (i < 5) console.log("[LBCT] slot[" + i + "] skipped: no time extract, slotName=" + slotName);
+        }
       }
+
+      console.log("[LBCT] summary: total matched=", Object.keys(slotMap).length, ", skipped: date=" + skippedByDate + ", time=" + skippedByTime + ", openings=0=" + skippedByOpenings);
+      console.log("[LBCT] slotMap keys:", Object.keys(slotMap));
       return slotMap;
-    } catch(e) { return {}; }
+    } catch (e) {
+      console.error("[LBCT] getSlotsByDate ERROR:", e.message, String(e).substring(0, 300));
+      // 非 cookie 错误向上抛，让调用方看到；401/cookie_expired 上层会自动重新登录
+      if (e.code === 401 || (e.message && e.message.indexOf("cookie_expired") !== -1)) throw e;
+      throw new Error(e.message || String(e));
+    }
   }
 
   async createBooking(container, date, time, options) {
@@ -2205,6 +2353,129 @@ app.get('/lbct/diagnose', async function(req, res) {
 });
 
 const PORT = process.env.PORT || 3000;
+
+// ====== LBCT Proxy Endpoints (for Worker → LBCT API) ======
+const https = require('https');
+
+// LBCT Proxy - 代理 LBCT API 请求（绕过 Cloudflare SSL 限制）
+app.post('/lbct/proxy', async function(req, res) {
+  var { enc, cookie, path, method } = req.body || {};
+  if (!enc || !cookie) {
+    return res.status(400).json({ error: 'enc and cookie are required' });
+  }
+
+  var targetPath = path || "/Appointments/getAppointmentTimeSlotWidthId";
+  var targetMethod = method || "POST";
+  var targetUrl = "https://portal.lbct.com" + targetPath;
+
+  var headers = {
+    "Content-Type": "application/json; charset=UTF-8",
+    "X-Requested-With": "XMLHttpRequest",
+    "Cookie": cookie,
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+  };
+
+  try {
+    var fetchOptions = {
+      method: targetMethod,
+      headers: headers,
+      agent: new https.Agent({ rejectUnauthorized: false })
+    };
+
+    if (targetMethod === "POST") {
+      fetchOptions.body = JSON.stringify({ enc: enc });
+    }
+
+    var response = await fetch(targetUrl, fetchOptions);
+    var text = await response.text();
+
+    var jsonResult = null;
+    try { jsonResult = JSON.parse(text); } catch(e) { /* 不是 JSON */ }
+
+    res.status(200).json({
+      status: response.status,
+      data: jsonResult || text
+    });
+  } catch (e) {
+    console.error("LBCT proxy error:", e.message);
+    res.status(500).json({ error: e.message || String(e) });
+  }
+});
+
+// LBCT Proxy Request - 通用代理端点（支持所有LBCT API请求类型）
+app.post('/lbct/proxy-request', async function(req, res) {
+  var body = req.body || {};
+  var { method, path, cookie, headers, body: requestBody } = body;
+
+  if (!path) {
+    return res.status(400).json({ error: 'path is required' });
+  }
+
+  method = (method || "GET").toUpperCase();
+  var targetUrl = "https://portal.lbct.com" + path;
+
+  var targetHeaders = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+    "Accept": "application/json, text/javascript, */*; q=0.01"
+  };
+
+  if (cookie) targetHeaders["Cookie"] = cookie;
+  if (headers) {
+    for (var k in headers) {
+      if (headers.hasOwnProperty(k)) targetHeaders[k] = headers[k];
+    }
+  }
+
+  var fetchOptions = {
+    method: method,
+    headers: targetHeaders,
+    agent: new https.Agent({ rejectUnauthorized: false })
+  };
+
+  if (requestBody) {
+    if (requestBody.contentType === "form") {
+      targetHeaders["Content-Type"] = "application/x-www-form-urlencoded; charset=UTF-8";
+      fetchOptions.body = requestBody.formData;
+    } else if (requestBody.contentType === "json") {
+      targetHeaders["Content-Type"] = "application/json; charset=UTF-8";
+      fetchOptions.body = JSON.stringify(requestBody.jsonData);
+    } else {
+      targetHeaders["Content-Type"] = "application/json; charset=UTF-8";
+      fetchOptions.body = JSON.stringify(requestBody);
+    }
+  }
+
+  try {
+    var response = await fetch(targetUrl, fetchOptions);
+    var text = await response.text();
+
+    var responseHeaders = {};
+    var setCookieHeader = response.headers.get("Set-Cookie");
+    if (setCookieHeader) {
+      responseHeaders["set-cookie"] = setCookieHeader;
+    }
+    var contentType = response.headers.get("Content-Type") || "";
+    if (contentType) responseHeaders["content-type"] = contentType;
+
+    var jsonResult = null;
+    if (contentType.indexOf("json") !== -1) {
+      try { jsonResult = JSON.parse(text); } catch(e) { jsonResult = text; }
+    } else {
+      jsonResult = text;
+    }
+
+    res.status(200).json({
+      status: response.status,
+      data: jsonResult,
+      headers: responseHeaders
+    });
+  } catch (e) {
+    console.error("LBCT proxy-request error:", e.message);
+    res.status(500).json({ error: e.message || String(e) });
+  }
+});
+
 app.listen(PORT, function() {
   console.log('EModal Connector running on port ' + PORT);
+  console.log('LBCT proxy endpoints available at /lbct/proxy and /lbct/proxy-request');
 });
