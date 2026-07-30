@@ -1800,15 +1800,81 @@ class LBCTClientConnector {
       for (var i = 0; i < slots.length; i++) {
         var s = slots[i];
         var openings = s.Openings !== undefined ? s.Openings : (s.openings !== undefined ? s.openings : -1);
-        if (openings === 0) { skippedByOpenings++; continue; }
+        // 跳过占位slot（Gkey=0或fakeId以01-01-0001开头）
+        var rawFakeId = s.FakeId || s.fakeId || s.FakeID || s.Id || s.id || "";
+        if (openings === 0 || rawFakeId.indexOf("01-01-0001") === 0 || s.Gkey === 0) {
+          skippedByOpenings++;
+          continue;
+        }
 
         var slotName = s.Slot || s.slot || s.SlotName || s.Name || s.TimeSlot || "";
-        var fakeId = s.FakeId || s.fakeId || s.FakeID || s.Id || s.id || "";
         var quotaRuleGkey = s.QuotaRuleGkey || s.quotaRuleGkey || s.QuotaRuleGKey || s.gkey || "";
+        var fakeId = String(rawFakeId);
         var slotDate = s.Date || s.date || s.ApptDate || s.StartDate || s.startDate || "";
+        var description = s.Description || s.description || "";
+        var info = s.Info || s.info || "";
 
+        // ====== 关键修复：优先从 fakeId 解析日期和时间 ======
+        // fakeId 格式: "07-30-2026 23:00#07-30-2026 23:29#2164171690"
+        // 这是港口本地时间，最可靠（避免 /Date() 时间戳的时区转换问题）
         var formattedDate = "";
-        if (slotDate) formattedDate = this.parseDate(slotDate);
+        var tk = "";
+
+        // 1. 从 fakeId 解析日期和时间
+        var fakeIdMatch = fakeId.match(/^(\d{2})-(\d{2})-(\d{4})\s+(\d{2}):(\d{2})/);
+        if (fakeIdMatch) {
+          formattedDate = fakeIdMatch[1] + "/" + fakeIdMatch[2] + "/" + fakeIdMatch[3];
+          tk = fakeIdMatch[4] + ":" + fakeIdMatch[5];
+          if (i < 5) console.log("[LBCT V3] slot[" + i + "] date+time from fakeId: " + formattedDate + " " + tk);
+        }
+
+        // 2. 如果fakeId没有，从 Description 解析时间（格式: "23:00-23:29 (Current Openings: 1)"）
+        if (!tk) {
+          var descMatch = description.match(/(\d{1,2}):(\d{2})\s*[-–]/);
+          if (descMatch) {
+            tk = String(parseInt(descMatch[1])).padStart(2, "0") + ":" + descMatch[2];
+            if (i < 5) console.log("[LBCT V3] slot[" + i + "] time from Description: " + tk);
+          }
+        }
+
+        // 3. 如果还没有日期，从 Info 字段解析（格式: "30-Jul 23:00-23:29 ..."）
+        if (!formattedDate && info) {
+          var infoDateMatch = info.match(/(\d{1,2})-(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)/);
+          if (infoDateMatch) {
+            var monthMap = {Jan:"01",Feb:"02",Mar:"03",Apr:"04",May:"05",Jun:"06",Jul:"07",Aug:"08",Sep:"09",Oct:"10",Nov:"11",Dec:"12"};
+            var month = monthMap[infoDateMatch[2]];
+            var day = String(parseInt(infoDateMatch[1])).padStart(2, "0");
+            // 从targetDate提取年份
+            var year = String(targetDate).split("/")[2] || String(new Date().getFullYear());
+            formattedDate = month + "/" + day + "/" + year;
+            if (i < 5) console.log("[LBCT V3] slot[" + i + "] date from Info: " + formattedDate);
+          }
+        }
+
+        // 4. 从 Info 解析时间
+        if (!tk && info) {
+          var infoTimeMatch = info.match(/(\d{1,2}):(\d{2})\s*[-–]/);
+          if (infoTimeMatch) {
+            tk = String(parseInt(infoTimeMatch[1])).padStart(2, "0") + ":" + infoTimeMatch[2];
+            if (i < 5) console.log("[LBCT V3] slot[" + i + "] time from Info: " + tk);
+          }
+        }
+
+        // 5. 最后兜底：从 /Date() 时间戳解析（可能有时区偏移，但总比没有好）
+        if (!formattedDate && slotDate) {
+          formattedDate = this.parseDate(slotDate);
+          if (i < 5) console.log("[LBCT V3] slot[" + i + "] date from parseDate: " + formattedDate);
+        }
+
+        // 6. 从 StartDate 提取时间（兜底）
+        if (!tk) {
+          tk = this.extractTimeFromStartDate(s);
+        }
+
+        // 7. 从 slotName 提取时间（兜底）
+        if (!tk && slotName) {
+          tk = extractTime(slotName);
+        }
 
         var dateMatch = true;
         if (formattedDate && normalizedTargetDate && formattedDate !== normalizedTargetDate) {
@@ -1817,29 +1883,25 @@ class LBCTClientConnector {
           if (f2 !== t2) { dateMatch = false; skippedByDate++; }
         }
 
-        var tk = extractTime(slotName);
-        if (!tk) tk = this.extractTimeFromStartDate(s);
-
-        // 记录每个slot的详情（不管是否匹配，给调试用）
+        // 记录每个slot的详情
         allSlotDetails.push({
           idx: i,
           slotName: slotName,
           extractedTime: tk,
-          rawDate: typeof slotDate === "object" ? JSON.stringify(slotDate) : String(slotDate || ""),
           formattedDate: formattedDate,
           dateMatchTarget: dateMatch,
           openings: openings,
-          fakeId: String(fakeId).substring(0, 30),
+          fakeId: fakeId.substring(0, 40),
           quotaRuleGkey: String(quotaRuleGkey).substring(0, 30)
         });
 
         if (tk && dateMatch) {
           slotMap[tk] = {
-            slot: slotName,
+            slot: slotName || (tk + " - " + (description || info).substring(0, 50)),
             time: tk,
-            fakeId: String(fakeId),
+            fakeId: fakeId,
             quotaRuleGkey: String(quotaRuleGkey),
-            date: formattedDate || slotDate || targetDate,
+            date: formattedDate || targetDate,
             openings: openings
           };
         } else if (!tk) {
