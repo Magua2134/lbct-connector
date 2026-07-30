@@ -1806,13 +1806,21 @@ class LBCTClientConnector {
   async getSlotsByDate(targetDate, container, bookingType) {
     bookingType = bookingType || "DI";
     try {
-      var plaintext = "cntrId:" + container + ",transactionType:" + bookingType + ",equTypeVal:,lineOperVal:,bookingNumber:";
+      // 对于还空柜(RM)，LBCT不要求cntrId字段，传柜号会触发"Container not found"检查
+      // 还空柜按车牌号+日期预约，柜号在创建预约时才需要
+      var cntrIdForQuery = (bookingType === "RM") ? "" : container;
+      var plaintext = "cntrId:" + cntrIdForQuery + ",transactionType:" + bookingType + ",equTypeVal:,lineOperVal:,bookingNumber:";
       var encrypted = await lbctEncrypt(plaintext);
       var customHeaders = { "X-Requested-With": "XMLHttpRequest", "Accept": "application/json, text/javascript, */*; q=0.01" };
       var result = await this.call("POST", "/Appointments/getAppointmentTimeSlotWidthId", { enc: encrypted }, "json", customHeaders);
 
       if (result && result.errorMsg) {
         console.error("[LBCT] getSlotsByDate API errorMsg:", result.errorMsg);
+        // 对"Container not found"错误做特殊处理：如果是RM类型且cntrId为空仍然报错，说明LBCT真的有问题
+        var isNotFound = (result.errorMsg || "").toLowerCase().indexOf("not found") !== -1;
+        if (isNotFound && bookingType === "RM") {
+          throw new Error("LBCT API 错误: " + result.errorMsg + "（RM/还空柜查询异常，请稍后重试或检查LBCT系统状态）");
+        }
         throw new Error("LBCT API 错误: " + result.errorMsg);
       }
 
