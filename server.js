@@ -6,6 +6,11 @@
 // 本地开发: 加载 .env (Render 会自动注入环境变量，不需要 dotenv 生产依赖)
 try { require('dotenv').config({ override: false }); } catch (e) {}
 
+// ⚠️ 禁用 SSL 严格验证：解决 portal.lbct.com 证书链不完整问题
+// 这是码头网站常见问题（自签名/过期/中间证书缺失），作为内部代理可接受
+process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
+console.log('[TLS] NODE_TLS_REJECT_UNAUTHORIZED=0 (SSL certificate verification disabled for LBCT)');
+
 const express = require('express');
 const cors = require('cors');
 
