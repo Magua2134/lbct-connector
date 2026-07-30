@@ -1559,7 +1559,9 @@ class LBCTClientConnector {
 
         // ---- Step 3: 提交登录表单 ----
         console.log("[LBCT] Step3: submitting login form...");
+        // LBCT 使用 "Email" 字段（某些版本可能用 "UserName"，两者都发）
         var formData = {
+          Email: username,
           UserName: username,
           Password: password,
           __RequestVerificationToken: csrf || client.csrfToken || "",
