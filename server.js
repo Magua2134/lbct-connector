@@ -1582,12 +1582,19 @@ class LBCTClientConnector {
         }
         if (typeof loginRespHtml === "string") {
           var lower = loginRespHtml.toLowerCase();
+          // 检测 LBCT 返回的各种错误信息
           if (lower.indexOf("login failed") !== -1 || lower.indexOf("invalid username") !== -1 ||
-              lower.indexOf("invalid password") !== -1 || lower.indexOf("错误") !== -1) {
+              lower.indexOf("invalid password") !== -1 || lower.indexOf("错误") !== -1 ||
+              lower.indexOf("no account found") !== -1 || lower.indexOf("not a valid e-mail") !== -1 ||
+              lower.indexOf("email field") !== -1 || lower.indexOf("incorrect") !== -1 ||
+              lower.indexOf("the password") !== -1 || lower.indexOf("locked out") !== -1) {
             if (captchaTaskId) {
               try { await captchaClient.reportBad(captchaTaskId); } catch(e) {}
             }
-            return { success: false, error: "invalid username or password", html: loginRespHtml.slice(0,500) };
+            // 提取具体的错误消息
+            var errMatch = loginRespHtml.match(/<li[^>]*>([^<]+)<\/li>/);
+            var errMsg = errMatch ? errMatch[1].trim() : "invalid username or password";
+            return { success: false, error: errMsg, html: loginRespHtml.slice(0,500) };
           }
         }
 
