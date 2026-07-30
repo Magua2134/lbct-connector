@@ -1369,6 +1369,36 @@ const lbctCookieCache = new Map();
 const LBCT_COOKIE_TTL = 7 * 60 * 60 * 1000; // 7小时 (LBCT 约 8 小时过期，提前1小时换)
 
 // ============================================
+// Cookie 工具函数
+// ============================================
+function mergeCookies(existingCookieStr, newSetCookie) {
+  if (!newSetCookie) return existingCookieStr || "";
+  // Parse the new Set-Cookie header: "name=value; path=/; expires=..."
+  var firstPart = newSetCookie.split(";")[0].trim();
+  if (!firstPart || firstPart.indexOf("=") === -1) return existingCookieStr || "";
+  var newName = firstPart.split("=")[0].trim();
+  var newValue = firstPart.split("=").slice(1).join("=").trim();
+
+  if (!existingCookieStr) return firstPart;
+
+  // Parse existing cookie string into name=value pairs
+  var cookies = existingCookieStr.split(";").map(function(c) { return c.trim(); }).filter(Boolean);
+  var found = false;
+  var result = [];
+  for (var i = 0; i < cookies.length; i++) {
+    var c = cookies[i];
+    if (c.indexOf(newName + "=") === 0) {
+      result.push(newName + "=" + newValue);
+      found = true;
+    } else {
+      result.push(c);
+    }
+  }
+  if (!found) result.push(newName + "=" + newValue);
+  return result.join("; ");
+}
+
+// ============================================
 // LBCT 客户端 (Connector 专属版本 - 内置 2Captcha 自动登录)
 // ============================================
 class LBCTClientConnector {
@@ -1400,7 +1430,9 @@ class LBCTClientConnector {
     }
 
     var url = path.startsWith("http") ? path : this.baseUrl + path;
+    console.log("[LBCT] HTTP " + method + " " + url);
     const resp = await fetch(url, opts);
+    console.log("[LBCT] HTTP " + method + " " + url + " → " + resp.status + " " + resp.statusText);
     this._accumulateCookies(resp);
 
     // 手动跟随 301/302 重定向（最多5层）
@@ -1410,16 +1442,25 @@ class LBCTClientConnector {
       var loc = curResp.headers.get("Location");
       if (!loc) break;
       if (loc.startsWith("/")) loc = this.baseUrl + loc;
+      console.log("[LBCT] 🔄 Redirect " + resp.status + " → " + loc);
       var rh = { "User-Agent": this.ua };
       if (this.cookieStr) rh["Cookie"] = this.cookieStr;
       curResp = await fetch(loc, { method: "GET", headers: rh, redirect: "manual" });
+      console.log("[LBCT] HTTP GET " + loc + " → " + curResp.status);
       this._accumulateCookies(curResp);
     }
 
-    if (curResp.status === 401) throw { code: 401, message: "cookie_expired" };
-    if (curResp.status === 403) throw { code: 403, message: "forbidden" };
+    if (curResp.status === 401) {
+      console.log("[LBCT] ❌ 401 Unauthorized - cookie expired");
+      throw { code: 401, message: "cookie_expired" };
+    }
+    if (curResp.status === 403) {
+      console.log("[LBCT] ❌ 403 Forbidden");
+      throw { code: 403, message: "forbidden" };
+    }
     if (!curResp.ok) {
       const txt = await curResp.text().catch(function(){ return ""; });
+      console.log("[LBCT] ❌ HTTP " + curResp.status + ": " + txt.slice(0, 200));
       throw { code: curResp.status, message: "HTTP " + curResp.status + ": " + txt.slice(0, 300) };
     }
 
@@ -1430,15 +1471,35 @@ class LBCTClientConnector {
 
   _accumulateCookies(resp) {
     try {
-      var list;
-      if (typeof resp.headers.getSetCookie === "function") list = resp.headers.getSetCookie();
-      else list = (resp.headers.get("Set-Cookie") || "").split("\n").filter(Boolean);
+      var list = [];
+      // undici (Node.js 18+ fetch) 支持 getSetCookie() 返回数组
+      if (typeof resp.headers.getSetCookie === "function") {
+        list = resp.headers.getSetCookie();
+      }
+      // 兼容标准 fetch headers.get("set-cookie") 返回多行或逗号分隔
+      if (!list || list.length === 0) {
+        var raw = resp.headers.get("set-cookie") || resp.headers.get("Set-Cookie") || "";
+        if (raw) {
+          // undici 可能用 \n 或 ,\n 分隔多个 cookie
+          list = raw.split(/\r?\n/).filter(Boolean);
+        }
+      }
+      if (list.length > 0) {
+        console.log("[LBCT] _accumulateCookies: found " + list.length + " Set-Cookie header(s)");
+      }
+      var oldLen = this.cookieStr ? this.cookieStr.length : 0;
       list.forEach(function(sc) {
         this.cookieStr = mergeCookies(this.cookieStr, sc);
         var m = sc.match(/__RequestVerificationToken=([^;]+)/);
         if (m) this.csrfToken = m[1];
       }.bind(this));
-    } catch(e) {}
+      var newLen = this.cookieStr ? this.cookieStr.length : 0;
+      if (newLen !== oldLen) {
+        console.log("[LBCT] Cookie updated: " + oldLen + " -> " + newLen + " bytes, cookieStr=" + (this.cookieStr ? this.cookieStr.substring(0, 80) + "..." : "(empty)"));
+      }
+    } catch(e) {
+      console.error("[LBCT] _accumulateCookies ERROR:", e.message);
+    }
   }
 
   // ================ 工具方法 ================
@@ -1512,6 +1573,11 @@ class LBCTClientConnector {
         });
 
         var loginRespHtml = await client.call("POST", "/LoginWithUrl/MyList", formData, "form");
+        console.log("[LBCT] Step3: POST login returned, cookie_len=" + client.cookieStr.length + ", status=seen in call()");
+        console.log("[LBCT] Step3: response preview: " + (typeof loginRespHtml === "string" ? loginRespHtml.substring(0, 200) : typeof loginRespHtml));
+        if (client.cookieStr) {
+          console.log("[LBCT] Step3: accumulated cookies: " + client.cookieStr.substring(0, 120) + (client.cookieStr.length > 120 ? "..." : ""));
+        }
         if (typeof loginRespHtml === "string") {
           var lower = loginRespHtml.toLowerCase();
           if (lower.indexOf("login failed") !== -1 || lower.indexOf("invalid username") !== -1 ||
@@ -1557,15 +1623,21 @@ class LBCTClientConnector {
 
   async validateCookie() {
     try {
+      console.log("[LBCT] validateCookie: GET /ViewMyList with cookie_len=" + (this.cookieStr ? this.cookieStr.length : 0));
       var html = await this.call("GET", "/ViewMyList");
-      if (typeof html !== "string") return false;
-      if (html.indexOf("LoginTimeout") !== -1) return false;
-      if (html.indexOf("window.location.href") !== -1 && html.length < 1500) return false;
-      if (html.indexOf("LoginWithUrl/_returnUrl_") !== -1 && html.length < 1500) return false;
-      if (html.indexOf("loginBoxLogin") !== -1 && html.indexOf("g-recaptcha") !== -1) return false;
+      console.log("[LBCT] validateCookie: response type=" + typeof html + ", len=" + (typeof html === "string" ? html.length : 0));
+      if (typeof html !== "string") { console.log("[LBCT] validateCookie: response is not a string!"); return false; }
+      if (html.indexOf("LoginTimeout") !== -1) { console.log("[LBCT] validateCookie: ❌ LoginTimeout detected"); return false; }
+      if (html.indexOf("window.location.href") !== -1 && html.length < 1500) { console.log("[LBCT] validateCookie: ❌ redirect loop detected (window.location.href)"); return false; }
+      if (html.indexOf("LoginWithUrl/_returnUrl_") !== -1 && html.length < 1500) { console.log("[LBCT] validateCookie: ❌ redirected back to login"); return false; }
+      if (html.indexOf("loginBoxLogin") !== -1 && html.indexOf("g-recaptcha") !== -1) { console.log("[LBCT] validateCookie: ❌ still on login page with captcha"); return false; }
       this.extractCsrf(html);
+      console.log("[LBCT] validateCookie: ✅ Cookie valid (html_len=" + html.length + ")");
       return true;
-    } catch(e) { return false; }
+    } catch(e) {
+      console.log("[LBCT] validateCookie: ❌ Exception:", e.message);
+      return false;
+    }
   }
 
   // ================ 业务接口 ================
