@@ -1716,17 +1716,28 @@ class LBCTClientConnector {
     try {
       var plaintext = "cntrId:" + container + ",transactionType:" + bookingType + ",equTypeVal:,lineOperVal:,bookingNumber:";
       var encrypted = await lbctEncrypt(plaintext);
-      // 添加 X-Requested-With 头 (AJAX 必需)
       var customHeaders = { "X-Requested-With": "XMLHttpRequest", "Accept": "application/json, text/javascript, */*; q=0.01" };
       var result = await this.call("POST", "/Appointments/getAppointmentTimeSlotWidthId", { enc: encrypted }, "json", customHeaders);
 
-      // 检查 LBCT API 返回的错误信息
       if (result && result.errorMsg) {
         console.error("[LBCT] getSlotsByDate API errorMsg:", result.errorMsg);
         throw new Error("LBCT API 错误: " + result.errorMsg);
       }
 
-      console.log("[LBCT] response type:", typeof result, "keys:", result && typeof result === "object" ? Object.keys(result).slice(0, 10) : "N/A");
+      console.log("[LBCT V3] response type:", typeof result, "keys:", result && typeof result === "object" ? Object.keys(result).slice(0, 15) : "N/A");
+
+      // 保存原始响应到 this._lastRawResult（外层 /lbct/slots 会用）
+      this._lastRawResult = result;
+      this._lastRawSlots = null;
+      this._lastDebugInfo = {
+        targetDate: targetDate,
+        container: container,
+        bookingType: bookingType,
+        responseType: typeof result,
+        responseKeys: result && typeof result === "object" ? Object.keys(result).slice(0, 15) : null,
+        responseIsArray: Array.isArray(result),
+        responsePreview: JSON.stringify(result).substring(0, 500)
+      };
 
       var slots = [];
       if (Array.isArray(result)) slots = result;
@@ -1741,31 +1752,41 @@ class LBCTClientConnector {
         else if (result.Data.slots && Array.isArray(result.Data.slots)) slots = result.Data.slots;
         else slots = [result.Data];
       }
-      // LBCT 可能返回单对象，需要包装成数组
-      else if (result && typeof result === "object" && result.StartDate) {
+      else if (result && typeof result === "object" && (result.StartDate || result.startDate)) {
         slots = [result];
       }
-      // 最后兜底：如果 result 是对象但不是数组，尝试作为单条记录
       else if (result && typeof result === "object" && !Array.isArray(result)) {
         var found = false;
         for (var key in result) {
           if (Array.isArray(result[key]) && result[key].length > 0) {
             slots = result[key];
-            console.log("[LBCT] found slots array in result[" + key + "], length:", slots.length);
+            console.log("[LBCT V3] found slots array in result[" + key + "], length:", slots.length);
             found = true;
             break;
           }
         }
-        if (!found && result.StartDate) slots = [result];
+        if (!found && (result.StartDate || result.startDate)) slots = [result];
       }
 
-      console.log("[LBCT] slots count after parse:", slots.length);
+      this._lastRawSlots = slots;
+      this._lastDebugInfo.slotsCountAfterParse = slots.length;
+      console.log("[LBCT V3] slots count after all struct detection:", slots.length);
+
       if (slots.length > 0) {
-        console.log("[LBCT] first slot keys:", Object.keys(slots[0]));
-        console.log("[LBCT] first slot:", JSON.stringify(slots[0]).substring(0, 400));
+        console.log("[LBCT V3] first slot keys:", Object.keys(slots[0]));
+        console.log("[LBCT V3] first slot:", JSON.stringify(slots[0]).substring(0, 800));
+        if (slots.length > 1) console.log("[LBCT V3] last slot:", JSON.stringify(slots[slots.length - 1]).substring(0, 600));
+        // 打印所有 slot 的日期和时间字段
+        for (var di = 0; di < Math.min(slots.length, 10); di++) {
+          var ds = slots[di];
+          console.log("[LBCT V3] slot[" + di + "] Date=" + (ds.Date || ds.date || "") +
+            " StartDate=" + (typeof (ds.StartDate || ds.startDate) === "object" ? JSON.stringify(ds.StartDate || ds.startDate) : (ds.StartDate || ds.startDate || "")) +
+            " Slot=" + (ds.Slot || ds.slot || "") +
+            " Openings=" + (ds.Openings !== undefined ? ds.Openings : (ds.openings !== undefined ? ds.openings : "N/A")));
+        }
       }
 
-      // 归一化目标日期（确保是 MM/DD/YYYY 格式）
+      // 归一化目标日期
       var ntp = String(targetDate).split("/");
       var normalizedTargetDate = String(targetDate);
       if (ntp.length === 3) normalizedTargetDate = String(parseInt(ntp[0])).padStart(2, "0") + "/" + String(parseInt(ntp[1])).padStart(2, "0") + "/" + ntp[2];
@@ -1774,11 +1795,12 @@ class LBCTClientConnector {
       var skippedByDate = 0;
       var skippedByTime = 0;
       var skippedByOpenings = 0;
+      var allSlotDetails = [];
 
       for (var i = 0; i < slots.length; i++) {
         var s = slots[i];
         var openings = s.Openings !== undefined ? s.Openings : (s.openings !== undefined ? s.openings : -1);
-        if (openings === 0) { skippedByOpenings++; if (i < 5) console.log("[LBCT] slot[" + i + "] skipped: Openings=0"); continue; }
+        if (openings === 0) { skippedByOpenings++; continue; }
 
         var slotName = s.Slot || s.slot || s.SlotName || s.Name || s.TimeSlot || "";
         var fakeId = s.FakeId || s.fakeId || s.FakeID || s.Id || s.id || "";
@@ -1788,22 +1810,30 @@ class LBCTClientConnector {
         var formattedDate = "";
         if (slotDate) formattedDate = this.parseDate(slotDate);
 
+        var dateMatch = true;
         if (formattedDate && normalizedTargetDate && formattedDate !== normalizedTargetDate) {
-          // 归一化比较: 7/30/2026 vs 07/30/2026
           var f2 = formattedDate.replace(/^(\d)\//, "0$1/");
           var t2 = normalizedTargetDate.replace(/^(\d)\//, "0$1/");
-          if (f2 !== t2) {
-            skippedByDate++;
-            if (i < 5) console.log("[LBCT] slot[" + i + "] skipped: date mismatch", normalizedTargetDate, "vs", formattedDate);
-            continue;
-          }
+          if (f2 !== t2) { dateMatch = false; skippedByDate++; }
         }
 
         var tk = extractTime(slotName);
         if (!tk) tk = this.extractTimeFromStartDate(s);
 
-        if (tk) {
-          if (i < 5) console.log("[LBCT] slot[" + i + "] match: time=" + tk + ", openings=" + openings + ", fakeId=" + String(fakeId).substring(0, 20));
+        // 记录每个slot的详情（不管是否匹配，给调试用）
+        allSlotDetails.push({
+          idx: i,
+          slotName: slotName,
+          extractedTime: tk,
+          rawDate: typeof slotDate === "object" ? JSON.stringify(slotDate) : String(slotDate || ""),
+          formattedDate: formattedDate,
+          dateMatchTarget: dateMatch,
+          openings: openings,
+          fakeId: String(fakeId).substring(0, 30),
+          quotaRuleGkey: String(quotaRuleGkey).substring(0, 30)
+        });
+
+        if (tk && dateMatch) {
           slotMap[tk] = {
             slot: slotName,
             time: tk,
@@ -1812,18 +1842,25 @@ class LBCTClientConnector {
             date: formattedDate || slotDate || targetDate,
             openings: openings
           };
-        } else {
+        } else if (!tk) {
           skippedByTime++;
-          if (i < 5) console.log("[LBCT] slot[" + i + "] skipped: no time extract, slotName=" + slotName);
         }
       }
 
-      console.log("[LBCT] summary: total matched=", Object.keys(slotMap).length, ", skipped: date=" + skippedByDate + ", time=" + skippedByTime + ", openings=0=" + skippedByOpenings);
-      console.log("[LBCT] slotMap keys:", Object.keys(slotMap));
+      this._lastDebugInfo.skippedByDate = skippedByDate;
+      this._lastDebugInfo.skippedByTime = skippedByTime;
+      this._lastDebugInfo.skippedByOpenings = skippedByOpenings;
+      this._lastDebugInfo.matchedCount = Object.keys(slotMap).length;
+      this._lastDebugInfo.allSlotDetails = allSlotDetails;
+      this._lastDebugInfo.targetDateNormalized = normalizedTargetDate;
+
+      console.log("[LBCT V3] SUMMARY: targetDate=" + normalizedTargetDate + " total=" + slots.length +
+        " matched=" + Object.keys(slotMap).length +
+        " skipped: date=" + skippedByDate + " time=" + skippedByTime + " openings0=" + skippedByOpenings);
+      console.log("[LBCT V3] slotMap keys:", Object.keys(slotMap));
       return slotMap;
     } catch (e) {
-      console.error("[LBCT] getSlotsByDate ERROR:", e.message, String(e).substring(0, 300));
-      // 非 cookie 错误向上抛，让调用方看到；401/cookie_expired 上层会自动重新登录
+      console.error("[LBCT V3] getSlotsByDate ERROR:", e.message, String(e).substring(0, 500));
       if (e.code === 401 || (e.message && e.message.indexOf("cookie_expired") !== -1)) throw e;
       throw new Error(e.message || String(e));
     }
@@ -2246,30 +2283,19 @@ app.post('/lbct/appointments', async function(req, res) {
   }
 });
 
-// L4: 查询可用 slot
+// L4: 查询可用 slot (V3版本：强制返回所有调试信息，带版本号验证)
 app.post('/lbct/slots', async function(req, res) {
   var username = req.body && req.body.username;
   var password = req.body && req.body.password;
   var container = req.body && req.body.container;
   var date = req.body && req.body.date;
   var bookingType = (req.body && req.body.bookingType) || "DI";
-  var debug = req.body && req.body.debug;  // 调试模式：返回原始响应
-  if (!username || !password) return res.status(400).json({ error: 'username and password required' });
-  if (!container || !date) return res.status(400).json({ error: 'container and date required' });
+  if (!username || !password) return res.status(400).json({ connectorVersion: "V3-20260730b", error: 'username and password required' });
+  if (!container || !date) return res.status(400).json({ connectorVersion: "V3-20260730b", error: 'container and date required' });
   try {
     var client = await getValidLbctClient(username, password, false);
     var map;
-    var rawResponse = null;
     try {
-      if (debug) {
-        // 调试模式：直接调用LBCT API获取原始响应
-        var plaintext = "cntrId:" + container + ",transactionType:" + bookingType + ",equTypeVal:,lineOperVal:,bookingNumber:";
-        var encrypted = await lbctEncrypt(plaintext);
-        var customHeaders = { "X-Requested-With": "XMLHttpRequest", "Accept": "application/json, text/javascript, */*; q=0.01" };
-        rawResponse = await client.call("POST", "/Appointments/getAppointmentTimeSlotWidthId", { enc: encrypted }, "json", customHeaders);
-        console.log("[LBCT DEBUG] raw response type:", typeof rawResponse);
-        console.log("[LBCT DEBUG] raw response preview:", JSON.stringify(rawResponse).substring(0, 1000));
-      }
       map = await client.getSlotsByDate(date, container, bookingType);
     } catch (e) {
       if (e && (e.code === 401 || (e.message && e.message.indexOf("cookie_expired") !== -1))) {
@@ -2277,18 +2303,45 @@ app.post('/lbct/slots', async function(req, res) {
         map = await client.getSlotsByDate(date, container, bookingType);
       } else throw e;
     }
-    var resp = { success: true, slots: map, container: container, date: date, bookingType: bookingType, slotCount: Object.keys(map || {}).length };
-    if (debug && rawResponse !== null) {
-      resp.debug = {
-        rawResponseType: typeof rawResponse,
-        rawResponsePreview: typeof rawResponse === "string" ? rawResponse.substring(0, 2000) : JSON.stringify(rawResponse).substring(0, 2000),
-        rawResponseFull: rawResponse
-      };
+    var resp = {
+      connectorVersion: "V3-20260730b",
+      success: true,
+      slots: map,
+      slotCount: Object.keys(map || {}).length,
+      container: container,
+      date: date,
+      bookingType: bookingType
+    };
+    // 始终返回调试信息（不管请求是否带debug参数）
+    if (client._lastDebugInfo) resp.debugInfo = client._lastDebugInfo;
+    if (client._lastRawResult !== undefined) {
+      if (typeof client._lastRawResult === "string") {
+        resp.rawResponse = client._lastRawResult.substring(0, 3000);
+      } else {
+        resp.rawResponse = client._lastRawResult;
+      }
+    }
+    if (client._lastRawSlots) {
+      resp.rawSlots = client._lastRawSlots.map(function(s) {
+        // 只保留关键字段，避免payload过大
+        return {
+          Slot: s.Slot || s.slot || s.SlotName || s.Name || s.TimeSlot || "",
+          Date: s.Date || s.date || s.ApptDate || "",
+          StartDate: s.StartDate || s.startDate || "",
+          Openings: s.Openings !== undefined ? s.Openings : (s.openings !== undefined ? s.openings : null),
+          FakeId: s.FakeId || s.fakeId || s.FakeID || s.Id || s.id || "",
+          QuotaRuleGkey: s.QuotaRuleGkey || s.quotaRuleGkey || s.QuotaRuleGKey || s.gkey || ""
+        };
+      }).slice(0, 50);  // 最多返回前50个
     }
     res.json(resp);
   } catch (e) {
     var code = (e && e.code) || 500;
-    res.status(code).json({ error: e.message || String(e), stack: e.stack ? e.stack.split("\n").slice(0, 5).join(" | ") : "" });
+    res.status(code).json({
+      connectorVersion: "V3-20260730b",
+      error: e.message || String(e),
+      stack: e.stack ? e.stack.split("\n").slice(0, 5).join(" | ") : ""
+    });
   }
 });
 
