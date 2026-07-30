@@ -1650,9 +1650,10 @@ class LBCTClientConnector {
   }
 
   // ================ 业务接口 ================
-  async getSlotsByDate(targetDate, container) {
+  async getSlotsByDate(targetDate, container, bookingType) {
+    bookingType = bookingType || "DI";
     try {
-      var plaintext = "cntrId:" + container + ",transactionType:DI,equTypeVal:,lineOperVal:,bookingNumber:";
+      var plaintext = "cntrId:" + container + ",transactionType:" + bookingType + ",equTypeVal:,lineOperVal:,bookingNumber:";
       var encrypted = await lbctEncrypt(plaintext);
       var result = await this.call("POST", "/Appointments/getAppointmentTimeSlotWidthId", { enc: encrypted });
       var slots = [];
@@ -1682,6 +1683,7 @@ class LBCTClientConnector {
 
   async createBooking(container, date, time, options) {
     options = options || {};
+    var bookingType = options.bookingType || "DI";
     var slotMap = options.slotMap || {};
     var matched = slotMap[time];
     if (!matched) {
@@ -1693,7 +1695,7 @@ class LBCTClientConnector {
     if (!matched) throw new Error("no_slot_found: " + time);
 
     var apptData = {
-      EqoiGkey: -1, TransactionType: "DI", LineOperation: "", ContainerId: container,
+      EqoiGkey: -1, TransactionType: bookingType, LineOperation: "", ContainerId: container,
       SealNumber: "", SealNumber2: "", OrderId: "", FakeId: matched.fakeId || "",
       quotaRuleGkey: matched.quotaRuleGkey || "", equipType: "", LPN: ""
     };
@@ -2102,20 +2104,21 @@ app.post('/lbct/slots', async function(req, res) {
   var password = req.body && req.body.password;
   var container = req.body && req.body.container;
   var date = req.body && req.body.date;
+  var bookingType = (req.body && req.body.bookingType) || "DI";
   if (!username || !password) return res.status(400).json({ error: 'username and password required' });
   if (!container || !date) return res.status(400).json({ error: 'container and date required' });
   try {
     var client = await getValidLbctClient(username, password, false);
     var map;
     try {
-      map = await client.getSlotsByDate(date, container);
+      map = await client.getSlotsByDate(date, container, bookingType);
     } catch (e) {
       if (e && (e.code === 401 || (e.message && e.message.indexOf("cookie_expired") !== -1))) {
         client = await getValidLbctClient(username, password, true);
-        map = await client.getSlotsByDate(date, container);
+        map = await client.getSlotsByDate(date, container, bookingType);
       } else throw e;
     }
-    res.json({ success: true, slots: map, container: container, date: date });
+    res.json({ success: true, slots: map, container: container, date: date, bookingType: bookingType });
   } catch (e) {
     var code = (e && e.code) || 500;
     res.status(code).json({ error: e.message || String(e) });
@@ -2130,19 +2133,20 @@ app.post('/lbct/book', async function(req, res) {
   var date = req.body && req.body.date;
   var time = req.body && req.body.time;
   var slotMap = req.body && req.body.slotMap;
+  var bookingType = (req.body && req.body.bookingType) || "DI";
   if (!username || !password) return res.status(400).json({ error: 'username and password required' });
   if (!container || !date || !time) return res.status(400).json({ error: 'container, date and time required' });
   try {
     var client = await getValidLbctClient(username, password, false);
-    var slots = slotMap || (await client.getSlotsByDate(date, container));
+    var slots = slotMap || (await client.getSlotsByDate(date, container, bookingType));
     var result;
     try {
-      result = await client.createBooking(container, date, time, { slotMap: slots });
+      result = await client.createBooking(container, date, time, { slotMap: slots, bookingType: bookingType });
     } catch (e) {
       if (e && (e.code === 401 || (e.message && e.message.indexOf("cookie_expired") !== -1))) {
         client = await getValidLbctClient(username, password, true);
-        slots = slotMap || (await client.getSlotsByDate(date, container));
-        result = await client.createBooking(container, date, time, { slotMap: slots });
+        slots = slotMap || (await client.getSlotsByDate(date, container, bookingType));
+        result = await client.createBooking(container, date, time, { slotMap: slots, bookingType: bookingType });
       } else throw e;
     }
     res.json({ success: true, result: result });
