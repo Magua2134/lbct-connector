@@ -1806,22 +1806,28 @@ class LBCTClientConnector {
   async getSlotsByDate(targetDate, container, bookingType) {
     bookingType = bookingType || "DI";
     try {
-      // 对于还空柜(RM)，LBCT不要求cntrId字段，传柜号会触发"Container not found"检查
-      // 还空柜按车牌号+日期预约，柜号在创建预约时才需要
-      var cntrIdForQuery = (bookingType === "RM") ? "" : container;
-      var plaintext = "cntrId:" + cntrIdForQuery + ",transactionType:" + bookingType + ",equTypeVal:,lineOperVal:,bookingNumber:";
+      // LBCT API要求：RM(还空柜)也必须传cntrId，或者传equTypeVal+lineOperVal
+      // 我们传cntrId（柜号），LBCT会检查柜号是否在系统中
+      var plaintext = "cntrId:" + container + ",transactionType:" + bookingType + ",equTypeVal:,lineOperVal:,bookingNumber:";
       var encrypted = await lbctEncrypt(plaintext);
       var customHeaders = { "X-Requested-With": "XMLHttpRequest", "Accept": "application/json, text/javascript, */*; q=0.01" };
       var result = await this.call("POST", "/Appointments/getAppointmentTimeSlotWidthId", { enc: encrypted }, "json", customHeaders);
 
       if (result && result.errorMsg) {
         console.error("[LBCT] getSlotsByDate API errorMsg:", result.errorMsg);
-        // 对"Container not found"错误做特殊处理：如果是RM类型且cntrId为空仍然报错，说明LBCT真的有问题
-        var isNotFound = (result.errorMsg || "").toLowerCase().indexOf("not found") !== -1;
-        if (isNotFound && bookingType === "RM") {
-          throw new Error("LBCT API 错误: " + result.errorMsg + "（RM/还空柜查询异常，请稍后重试或检查LBCT系统状态）");
+        var errMsg = result.errorMsg || "";
+        var isNotFound = errMsg.toLowerCase().indexOf("not found") !== -1;
+        var isEquipRequired = errMsg.indexOf("Equipment Type and Line Operator") !== -1;
+        // 对RM类型的特殊错误提示
+        if (bookingType === "RM") {
+          if (isNotFound) {
+            throw new Error("LBCT API 错误: " + errMsg + "（柜号在LBCT系统中不存在，可能尚未卸船或已离开LBCT）");
+          }
+          if (isEquipRequired) {
+            throw new Error("LBCT API 错误: " + errMsg + "（RM/还空柜需要Equipment Type或柜号，请确认柜号正确）");
+          }
         }
-        throw new Error("LBCT API 错误: " + result.errorMsg);
+        throw new Error("LBCT API 错误: " + errMsg);
       }
 
       console.log("[LBCT V3] response type:", typeof result, "keys:", result && typeof result === "object" ? Object.keys(result).slice(0, 15) : "N/A");
