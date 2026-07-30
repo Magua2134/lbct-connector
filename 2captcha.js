@@ -120,7 +120,8 @@ class TwoCaptchaClient {
       if (result.status === 1) {
         var token = result.request;
         console.log("[2Captcha] 成功，耗时 " + Math.round((Date.now() - startedAt) / 1000) + "s，token 长度=" + token.length);
-        return token;
+        // 返回 {taskId, response} 对象，兼容 server.js 的调用方式
+        return { taskId: taskId, response: token };
       }
       if (result.request === "CAPCHA_NOT_READY") continue;
       // 其他错误
