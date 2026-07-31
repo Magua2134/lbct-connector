@@ -2150,7 +2150,10 @@ async function getValidLbctClient(username, password, force) {
 // ============================================
 // Token Management Helper
 // ============================================
-async function getValidClient(username, password) {
+const TOKEN_CACHE_TTL = 50 * 60 * 1000; // 50 minutes (EModal tokens expire in 1 hour)
+const tokenCache = new Map(); // Map<username, {accessToken, refreshToken, authCookie, expiresAt}>
+
+async function getValidClient(username, password, authCookie) {
   // Check cache first
   var cached = tokenCache.get(username);
   if (cached && cached.expiresAt > Date.now()) {
@@ -2163,14 +2166,35 @@ async function getValidClient(username, password) {
     return client;
   }
 
-  // Need to login
+  // If authCookie is provided, try using it directly (no login needed)
+  if (authCookie && authCookie.length > 20) {
+    var cookieClient = new EModalClient({
+      apiMode: 'native',
+      password: authCookie,
+      token: authCookie
+    });
+    // Cache it for future use
+    tokenCache.set(username, {
+      accessToken: '',
+      refreshToken: '',
+      authCookie: authCookie,
+      expiresAt: Date.now() + TOKEN_CACHE_TTL
+    });
+    return cookieClient;
+  }
+
+  // Need to login with username + password
+  if (!password) {
+    throw { code: 401, message: 'No valid token or password provided. Please re-login from the account page.' };
+  }
+
   var loginResult = await EModalClient.loginWithCredentials(username, password);
   if (!loginResult.success) {
     throw { code: 401, message: 'Login failed: ' + (loginResult.reason || 'unknown') };
   }
 
   // Cache the token
-  var authCookie = loginResult.authCookie || JSON.stringify({
+  var newAuthCookie = loginResult.authCookie || JSON.stringify({
     bearer: loginResult.accessToken,
     refresh_token: loginResult.refreshToken,
     client_id: 'PCEMODAL'
@@ -2179,14 +2203,14 @@ async function getValidClient(username, password) {
   tokenCache.set(username, {
     accessToken: loginResult.accessToken,
     refreshToken: loginResult.refreshToken,
-    authCookie: authCookie,
+    authCookie: newAuthCookie,
     expiresAt: Date.now() + TOKEN_CACHE_TTL
   });
 
   return new EModalClient({
     apiMode: 'native',
-    password: authCookie,
-    token: authCookie
+    password: newAuthCookie,
+    token: newAuthCookie
   });
 }
 
@@ -2265,11 +2289,12 @@ app.post('/api/emodal/login', async function(req, res) {
 app.post('/api/emodal/appointments', async function(req, res) {
   var username = req.body && req.body.username;
   var password = req.body && req.body.password;
-  if (!username || !password) {
-    return res.status(400).json({ error: 'username and password required' });
+  var authCookie = req.body && req.body.authCookie;
+  if (!username || (!password && !authCookie)) {
+    return res.status(400).json({ error: 'username and (password or authCookie) required' });
   }
   try {
-    var client = await getValidClient(username, password);
+    var client = await getValidClient(username, password, authCookie);
     var result;
     try {
       result = await client.getAppointments();
@@ -2277,7 +2302,7 @@ app.post('/api/emodal/appointments', async function(req, res) {
       // If token expired (401), refresh/re-login and retry ONCE
       if (e && e.code === 401) {
         tokenCache.delete(username);
-        client = await getValidClient(username, password);
+        client = await getValidClient(username, password, authCookie);
         result = await client.getAppointments();
       } else {
         throw e;
@@ -2294,27 +2319,44 @@ app.post('/api/emodal/appointments', async function(req, res) {
 app.post('/api/emodal/slots', async function(req, res) {
   var username = req.body && req.body.username;
   var password = req.body && req.body.password;
+  var authCookie = req.body && req.body.authCookie;
   var container = req.body && req.body.container;
   var date = req.body && req.body.date;
-  if (!username || !password) {
-    return res.status(400).json({ error: 'username and password required' });
+  if (!username || (!password && !authCookie)) {
+    return res.status(400).json({ error: 'username and (password or authCookie) required' });
   }
   if (!container || !date) {
     return res.status(400).json({ error: 'container and date required' });
   }
   try {
-    var client = await getValidClient(username, password);
+    var client = await getValidClient(username, password, authCookie);
     var result;
     try {
       result = await client.getSlotsByDate(date, container, null, null);
     } catch (e) {
       if (e && e.code === 401) {
         tokenCache.delete(username);
-        client = await getValidClient(username, password);
+        client = await getValidClient(username, password, authCookie);
         result = await client.getSlotsByDate(date, container, null, null);
       } else {
         throw e;
       }
+    }
+    // Ensure slots is always an array
+    if (!Array.isArray(result)) {
+      var slotArr = [];
+      if (result && typeof result === 'object') {
+        var keys = Object.keys(result);
+        for (var ki = 0; ki < keys.length; ki++) {
+          var val = result[keys[ki]];
+          if (typeof val === 'string') {
+            slotArr.push({ time: val });
+          } else if (val && typeof val === 'object') {
+            slotArr.push(val);
+          }
+        }
+      }
+      result = slotArr;
     }
     res.json({ success: true, slots: result });
   } catch (e) {
@@ -2327,19 +2369,20 @@ app.post('/api/emodal/slots', async function(req, res) {
 app.post('/api/emodal/book', async function(req, res) {
   var username = req.body && req.body.username;
   var password = req.body && req.body.password;
+  var authCookie = req.body && req.body.authCookie;
   var container = req.body && req.body.container;
   var date = req.body && req.body.date;
   var time = req.body && req.body.time;
   var existingApptId = req.body && req.body.existingApptId;
   var terminal = req.body && req.body.terminal;
-  if (!username || !password) {
-    return res.status(400).json({ error: 'username and password required' });
+  if (!username || (!password && !authCookie)) {
+    return res.status(400).json({ error: 'username and (password or authCookie) required' });
   }
   if (!container || !date || !time) {
     return res.status(400).json({ error: 'container, date and time required' });
   }
   try {
-    var client = await getValidClient(username, password);
+    var client = await getValidClient(username, password, authCookie);
     var options = {};
     if (existingApptId) {
       options.existingAppt = { gateApptId: existingApptId };
@@ -2351,7 +2394,7 @@ app.post('/api/emodal/book', async function(req, res) {
     } catch (e) {
       if (e && e.code === 401) {
         tokenCache.delete(username);
-        client = await getValidClient(username, password);
+        client = await getValidClient(username, password, authCookie);
         result = await client.createBooking(container, date, time, options);
       } else {
         throw e;
@@ -2368,22 +2411,23 @@ app.post('/api/emodal/book', async function(req, res) {
 app.post('/api/emodal/cancel', async function(req, res) {
   var username = req.body && req.body.username;
   var password = req.body && req.body.password;
+  var authCookie = req.body && req.body.authCookie;
   var appointmentId = req.body && req.body.appointmentId;
-  if (!username || !password) {
-    return res.status(400).json({ error: 'username and password required' });
+  if (!username || (!password && !authCookie)) {
+    return res.status(400).json({ error: 'username and (password or authCookie) required' });
   }
   if (!appointmentId) {
     return res.status(400).json({ error: 'appointmentId required' });
   }
   try {
-    var client = await getValidClient(username, password);
+    var client = await getValidClient(username, password, authCookie);
     var result;
     try {
       result = await client.cancelAppointment(appointmentId);
     } catch (e) {
       if (e && e.code === 401) {
         tokenCache.delete(username);
-        client = await getValidClient(username, password);
+        client = await getValidClient(username, password, authCookie);
         result = await client.cancelAppointment(appointmentId);
       } else {
         throw e;
