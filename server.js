@@ -886,13 +886,25 @@ class EModalClient extends TerminalClient {
 
       // 检测并解决 reCAPTCHA（eModal 登录页可能有 reCAPTCHA v2/v3）
       var loginSitekey = "";
+      // 1. data-sitekey 属性 (reCAPTCHA v2)
       var skMatch = keycloakFinalHtml.match(/data-sitekey=["']([^"']+)["']/i);
       if (skMatch) loginSitekey = skMatch[1];
-      // 也检查 g-recaptcha div
+      // 2. g-recaptcha div
       if (!loginSitekey) {
         var grMatch = keycloakFinalHtml.match(/g-recaptcha[^>]*data-sitekey=["']([^"']+)["']/i);
         if (grMatch) loginSitekey = grMatch[1];
       }
+      // 3. reCAPTCHA v3 via script render= param
+      if (!loginSitekey) {
+        var renderMatch = keycloakFinalHtml.match(/recaptcha\/api\.js\?render=([^" '&]+)/i);
+        if (renderMatch) loginSitekey = renderMatch[1];
+      }
+      // 4. reCAPTCHA v3 via grecaptcha.execute('SITEKEY'...)
+      if (!loginSitekey) {
+        var execMatch = keycloakFinalHtml.match(/grecaptcha\.execute\(["']([^"']+)["']/i);
+        if (execMatch) loginSitekey = execMatch[1];
+      }
+      console.log('[EModal] Step1: reCAPTCHA sitekey=' + (loginSitekey ? loginSitekey.slice(0,12) + '...' : 'NOT_FOUND') + ', htmlLen=' + keycloakFinalHtml.length);
       if (loginSitekey && captchaClient) {
         console.log('[EModal] Step1: solving reCAPTCHA (sitekey=' + loginSitekey.slice(0,8) + '...)');
         try {
@@ -1025,12 +1037,25 @@ class EModalClient extends TerminalClient {
 
       // 检测密码页的 reCAPTCHA
       var passSitekey = "";
+      // 1. data-sitekey 属性 (reCAPTCHA v2)
       var pskMatch = passHtml.match(/data-sitekey=["']([^"']+)["']/i);
       if (pskMatch) passSitekey = pskMatch[1];
+      // 2. g-recaptcha div
       if (!passSitekey) {
         var pgrMatch = passHtml.match(/g-recaptcha[^>]*data-sitekey=["']([^"']+)["']/i);
         if (pgrMatch) passSitekey = pgrMatch[1];
       }
+      // 3. reCAPTCHA v3 via script render= param
+      if (!passSitekey) {
+        var prenderMatch = passHtml.match(/recaptcha\/api\.js\?render=([^" '&]+)/i);
+        if (prenderMatch) passSitekey = prenderMatch[1];
+      }
+      // 4. reCAPTCHA v3 via grecaptcha.execute('SITEKEY'...)
+      if (!passSitekey) {
+        var pexecMatch = passHtml.match(/grecaptcha\.execute\(["']([^"']+)["']/i);
+        if (pexecMatch) passSitekey = pexecMatch[1];
+      }
+      console.log('[EModal] Step3: reCAPTCHA sitekey=' + (passSitekey ? passSitekey.slice(0,12) + '...' : 'NOT_FOUND') + ', htmlLen=' + passHtml.length);
       if (passSitekey && captchaClient) {
         console.log('[EModal] Step3: solving reCAPTCHA for password page (sitekey=' + passSitekey.slice(0,8) + '...)');
         try {
