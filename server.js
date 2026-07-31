@@ -297,7 +297,7 @@ class EModalClient extends TerminalClient {
   // ====== 调用 EModal API（统一入口）======
   // 策略：优先调用 truckerportal 原生端点（浏览器真实路径，WAF 最宽容，不易 403/429）
   // 仅当原生端点 404/405/endpoint 不支持时，才 fallback 到 pregategateway 方式
-  async callGateway(controllerPath, requestType, data) {
+  async callGateway(controllerPath, requestType, data, extraPayload, skipPortal) {
     // ---- 第一步：原生端点 (truckerportal.emodal.com) ----
     // 先假设原生端点支持这个路径，直接试
     var method = (requestType || "GET").toUpperCase();
@@ -368,9 +368,9 @@ class EModalClient extends TerminalClient {
       try { return JSON.parse(txt); } catch (e) { return txt; }
     }.bind(this);
 
-    var res = await doPortalFetch();
+    var res = skipPortal ? { _portalUnsupported: true } : await doPortalFetch();
     // 原生端点能用，直接返回（绝大多数情况走这里，快，1次请求，不429）
-    if (!res || (typeof res !== "object") || (!res._portalUnsupported && !res._portal403)) {
+    if (!skipPortal && (!res || (typeof res !== "object") || (!res._portalUnsupported && !res._portal403))) {
       return res;
     }
 
@@ -380,6 +380,9 @@ class EModalClient extends TerminalClient {
       controllerPath: controllerPath,
       requestType: requestType || "GET"
     };
+    if (extraPayload) {
+      Object.keys(extraPayload).forEach(function(k) { payload[k] = extraPayload[k]; });
+    }
     var makeGatewayHeaders = function(token) {
       return {
         "Authorization": "Bearer " + token,
@@ -1052,32 +1055,57 @@ class EModalClient extends TerminalClient {
       return null;
     }
 
-    // Native 模式: 通过 SearchMyAppointments 查询
+    // Native 模式: 通过 SearchMyAppointments 查询 (pregategateway)
     try {
+      // 日期格式: MM-DD-YYYY (按 API 文档要求)
       var today = new Date();
       var laOpts = { timeZone: "America/Los_Angeles", month: "2-digit", day: "2-digit", year: "numeric" };
       var laStr = today.toLocaleDateString("en-US", laOpts);
       var parts = laStr.split("/");
-      var fromDate = parts[0] + "/" + parts[1] + "/" + parts[2];
+      var fromDate = parts[0] + "-" + parts[1] + "-" + parts[2];
 
       var futureDate = new Date(); futureDate.setDate(futureDate.getDate() + 30);
       var laStr2 = futureDate.toLocaleDateString("en-US", laOpts);
       var parts2 = laStr2.split("/");
-      var toDate = parts2[0] + "/" + parts2[1] + "/" + parts2[2];
+      var toDate = parts2[0] + "-" + parts2[1] + "-" + parts2[2];
 
+      // 按API文档: 使用 fc-eqp-nbr (不是 fc-cntr-nbr), 加上 fc-appt-status 和 fc-df-src
       var conditions = [
         { mem: "fc-busn-dt-from", vLow: fromDate, vHigh: "" },
         { mem: "fc-busn-dt-to", vLow: toDate, vHigh: "" },
-        { mem: "fc-cntr-nbr", vLow: container, vHigh: "" }
+        { mem: "fc-mto", vLow: "", vHigh: "" },
+        { mem: "fc-trk-co", vLow: "", vHigh: "" },
+        { mem: "fc-move-type", vLow: "", vHigh: "" },
+        { mem: "fc-appt-status", vLow: "C,W,F,D,P,U,X", vHigh: "" },
+        { mem: "fc-trk-plate", vLow: "", vHigh: "" },
+        { mem: "fc-ticket", vLow: "", vHigh: "" },
+        { mem: "fc-line-scac", vLow: "", vHigh: "" },
+        { mem: "fc-eqp-nbr", vLow: container, vHigh: "" },
+        { mem: "fc-ref-nbr", vLow: "", vHigh: "" },
+        { mem: "fc-eqp-iso", vLow: "", vHigh: "" },
+        { mem: "fc-is-checked-in", vLow: "", vHigh: "" },
+        { mem: "fc-is-single-dual", vLow: "", vHigh: "" },
+        { mem: "fc-df-src", vLow: "1", vHigh: "" }
       ];
+      // 完全按 API 文档的 payload 结构
       var payload = {
         key: null,
         viewName: "VisitView",
-        pageSize: 50,
+        pageSize: 500,
         Page: 1,
         conditions: conditions,
-        sortFields: [],
-        sortDirection: "asc"
+        ordering: [],
+        quickSearchText: null,
+        jsonBookingSearchText: null,
+        jsonApptSlotscheduleSearch: null,
+        jsonApptImportContainerSearch: null,
+        SearchByAppointmentId: null,
+        SearchByVisitId: null,
+        CurrentViewId: "0",
+        poolId: 0,
+        fromDateTime: "",
+        toDateTime: "",
+        moveType: ""
       };
       var result = await this.callGateway("/Visit/SearchMyAppointments?csrch=", "POST", payload);
 
@@ -1086,26 +1114,31 @@ class EModalClient extends TerminalClient {
       else if (result && Array.isArray(result.data)) list = result.data;
       else if (result && result.results) list = result.results;
       else if (result && result.items) list = result.items;
+      else if (result && result.rows) list = result.rows;
 
       if (!list.length) return null;
 
       var cUp = String(container || "").toUpperCase();
       for (var i = 0; i < list.length; i++) {
         var item = list[i];
-        var cc = (item.containerNo || item.containerNumber || item.container || item.cntrNbr || item.cntr_no || "").toString().toUpperCase();
+        var cc = (item.containerNo || item.containerNumber || item.container || item.cntrNbr || item.eqpNbr || item.equipmentNbr || item.cntr_no || "").toString().toUpperCase();
         if (cc === cUp) {
-          var id = item.visitId || item.appointmentId || item.id || item.visit_id || "";
+          var id = item.visitId || item.appointmentId || item.id || item.visit_id || item.gateApptId || item.gateNbr || "";
           if (!id && item.rowId) id = item.rowId;
+          if (!id && item.gkey) id = item.gkey;
           return {
             gateApptId: String(id),
             truckVisitApptId: 0,
             container: container,
             raw: item,
-            appointmentTime: item.appointmentDate || item.date || item.businessDate || ""
+            appointmentTime: item.appointmentDate || item.date || item.businessDate || item.busnDt || "",
+            apptStatus: item.apptStatus || item.status || item.visitStatus || ""
           };
         }
       }
-    } catch (e) {}
+    } catch (e) {
+      console.error('[EModal] getBooking error:', e.message || e);
+    }
     return null;
   }
 
@@ -1120,26 +1153,89 @@ class EModalClient extends TerminalClient {
       return this._parseDrayDogSlots(data, targetDate);
     }
 
-    // Native 模式: 多端点候选
+    // Native 模式: 使用正确的 /visitnextgen/GetAppointmentSlots 端点
+    // 将日期格式转为 ISO 格式 (如 2026-07-31T00:00:00)
+    var isoDate = targetDate;
+    try {
+      // 支持 MM/DD/YYYY 或 MM-DD-YYYY 输入
+      var dParts = targetDate.replace(/-/g, "/").split("/");
+      if (dParts.length >= 3) {
+        isoDate = dParts[2] + "-" + dParts[0].padStart(2, "0") + "-" + dParts[1].padStart(2, "0") + "T00:00:00";
+      }
+    } catch (e) {}
+
+    // MinDate = 目标日期, MaxDate = 目标日期 + 14天 (覆盖两周范围)
+    var maxIsoDate = isoDate;
+    try {
+      var dt = new Date(isoDate);
+      dt.setDate(dt.getDate() + 14);
+      maxIsoDate = dt.getFullYear() + "-" + String(dt.getMonth() + 1).padStart(2, "0") + "-" + String(dt.getDate()).padStart(2, "0") + "T00:00:00";
+    } catch (e) {}
+
+    // 按 API 文档的 AppointmentSlotsViewModel 结构
+    var slotData = {
+      "__type": "VisitNextGen.Models.ViewModels.AppointmentSlotsViewModel",
+      "AppointmentWindow": 0,
+      "MoveType": "",
+      "ContainerSize": null,
+      "ContainerType": null,
+      "IsExport": true,
+      "IsEmpty": false,
+      "Tab": null,
+      "Terminal": null,
+      "GKEY": null,
+      "MinDate": isoDate,
+      "MaxDate": maxIsoDate,
+      "Carrier": null,
+      "ContainerNbr": containerNo,
+      "Container": containerNo,
+      "GateApptId": gateApptId || null,
+      "TargetTime": targetTime || null,
+      "VisitId": gateApptId || null
+    };
+
+    try {
+      var result = await this.callGateway("/visitnextgen/GetAppointmentSlots", "POST", slotData);
+      var slots = this._extractSlots(result);
+      if (slots && slots.length > 0) {
+        return this._buildSlotMap(slots);
+      }
+      // 如果返回了数据但格式不同，尝试直接解析
+      if (result && typeof result === 'object' && !Array.isArray(result)) {
+        // 检查是否有内嵌的日期键 (按日期分组的时段)
+        var dateKeys = Object.keys(result);
+        var allSlots = [];
+        for (var dk = 0; dk < dateKeys.length; dk++) {
+          var dayData = result[dateKeys[dk]];
+          if (Array.isArray(dayData)) {
+            allSlots = allSlots.concat(dayData);
+          } else if (dayData && typeof dayData === 'object') {
+            if (dayData.slots) allSlots = allSlots.concat(dayData.slots);
+            if (dayData.Slots) allSlots = allSlots.concat(dayData.Slots);
+          }
+        }
+        if (allSlots.length > 0) {
+          return this._buildSlotMap(allSlots);
+        }
+      }
+    } catch (e) {
+      console.error('[EModal] getSlotsByDate error:', e.message || e);
+    }
+
+    // Fallback: 尝试旧端点（兼容性）
     var candidates = [
-      { path: "/Visit/GetAvailableSlots", type: "POST", data: { containerNo: containerNo, container: containerNo, terminal: "LBCT", facility: "LBCT", date: targetDate, appointmentDate: targetDate } },
       { path: "/visitnextgen/GetAvailableSlots", type: "POST", data: { container: containerNo, containerNo: containerNo, facility: "LBCT", terminal: "LBCT", appointmentDate: targetDate, date: targetDate } },
-      { path: "/GateSlot/GetAvailableGateSlots", type: "POST", data: { containerNumber: containerNo, container: containerNo, terminal: "LBCT", facility: "LBCT", date: targetDate } },
-      { path: "/visitnextgen/GetGateSlots", type: "POST", data: { container: containerNo, facility: "LBCT", appointmentDate: targetDate } },
-      { path: "/Appointment/GetAvailableTimeSlots", type: "POST", data: { containerNo: containerNo, terminalCode: "LBCT", appointmentDate: targetDate } }
+      { path: "/Visit/GetAvailableSlots", type: "POST", data: { containerNo: containerNo, container: containerNo, terminal: "LBCT", facility: "LBCT", date: targetDate, appointmentDate: targetDate } }
     ];
 
-    var lastError = null;
     for (var ci = 0; ci < candidates.length; ci++) {
       try {
-        var result = await this.callGateway(candidates[ci].path, candidates[ci].type, candidates[ci].data);
-        var slots = this._extractSlots(result);
-        if (slots && slots.length > 0) {
-          return this._buildSlotMap(slots);
+        var result2 = await this.callGateway(candidates[ci].path, candidates[ci].type, candidates[ci].data);
+        var slots2 = this._extractSlots(result2);
+        if (slots2 && slots2.length > 0) {
+          return this._buildSlotMap(slots2);
         }
-      } catch (e) {
-        lastError = e;
-      }
+      } catch (e) {}
     }
     return {};
   }
@@ -1170,16 +1266,24 @@ class EModalClient extends TerminalClient {
     if (result.data) {
       if (Array.isArray(result.data)) return result.data;
       if (result.data.slots) return result.data.slots;
+      if (result.data.Slots) return result.data.Slots;
       if (result.data.availableSlots) return result.data.availableSlots;
+      if (result.data.AvailableSlots) return result.data.AvailableSlots;
       if (result.data.available) return result.data.available;
       if (result.data.timeSlots) return result.data.timeSlots;
+      if (result.data.TimeSlots) return result.data.TimeSlots;
       if (result.data.gateSlots) return result.data.gateSlots;
     }
     if (result.slots) return result.slots;
+    if (result.Slots) return result.Slots;
     if (result.availableSlots) return result.availableSlots;
+    if (result.AvailableSlots) return result.AvailableSlots;
     if (result.available) return result.available;
     if (result.results) return result.results;
+    if (result.Results) return result.Results;
     if (result.timeSlots) return result.timeSlots;
+    if (result.TimeSlots) return result.TimeSlots;
+    if (result.AppointmentSlots) return result.AppointmentSlots;
     return [];
   }
 
@@ -1192,11 +1296,15 @@ class EModalClient extends TerminalClient {
         if (tk1) slotMap[tk1] = { slot: s, id: s, gate: "LBCT" };
         continue;
       }
-      var timeStr = s.time || s.slotTime || s.label || s.window_start || s.start || s.slot || s.timeSlot || "";
+      // 支持 camelCase 和 PascalCase 字段名 (.NET API 风格)
+      var timeStr = s.time || s.Time || s.slotTime || s.SlotTime || s.label || s.Label ||
+        s.window_start || s.WindowStart || s.start || s.Start || s.startTime || s.StartTime ||
+        s.slot || s.Slot || s.timeSlot || s.TimeSlot || s.AppointmentTime || "";
       var tk2 = extractTime(timeStr);
       if (tk2) {
-        var id = s.id || s.slotId || s.slot_id || s.appointmentSlotId || tk2;
-        var gate = s.gate || s.terminal || s.facility || "LBCT";
+        var id = s.id || s.Id || s.slotId || s.SlotId || s.slot_id || s.SlotID ||
+          s.appointmentSlotId || s.AppointmentSlotId || s.gkey || s.GKEY || tk2;
+        var gate = s.gate || s.Gate || s.terminal || s.Terminal || s.facility || s.Facility || "LBCT";
         slotMap[tk2] = { slot: timeStr, id: String(id), gate: gate };
       }
     }
@@ -1208,6 +1316,7 @@ class EModalClient extends TerminalClient {
     options = options || {};
     var existing = options.existingAppt || null;
     var slotMap = options.slotMap || null;
+    var terminal = options.terminal || "";
 
     // 获取匹配的 slot
     var matchedSlot = null;
@@ -1220,6 +1329,7 @@ class EModalClient extends TerminalClient {
       }
     }
     var slotId = matchedSlot ? matchedSlot.slot : time;
+    var slotGateId = matchedSlot ? matchedSlot.id : "";
 
     if (this.apiMode === "draydog") {
       var payload = {
@@ -1240,42 +1350,52 @@ class EModalClient extends TerminalClient {
       };
     }
 
-    // Native 模式: 多端点候选
+    // Native 模式: 通过 pregategateway 路由
+    // 将日期转为 ISO 格式
+    var isoDate = date;
+    try {
+      var dParts = date.replace(/-/g, "/").split("/");
+      if (dParts.length >= 3) {
+        isoDate = dParts[2] + "-" + dParts[0].padStart(2, "0") + "-" + dParts[1].padStart(2, "0");
+      }
+    } catch (e) {}
+
     var bookPayload = {
-      containerNo: container,
-      containerNumber: container,
-      container: container,
-      terminal: "LBCT",
-      facility: "LBCT",
-      appointmentDate: date,
-      date: date,
-      timeSlot: time,
-      slot: slotId,
-      windowStart: time,
-      windowEnd: time
+      "__type": "VisitNextGen.Models.ViewModels.VisitViewModel",
+      "ContainerNbr": container,
+      "Container": container,
+      "AppointmentDate": isoDate,
+      "Date": isoDate,
+      "TimeSlot": time,
+      "Slot": slotId,
+      "SlotId": slotGateId || slotId,
+      "WindowStart": time,
+      "WindowEnd": time,
+      "Terminal": terminal || null,
+      "GateApptId": (existing && existing.gateApptId) ? existing.gateApptId : null,
+      "VisitId": (existing && existing.gateApptId) ? existing.gateApptId : null
     };
 
     var endpoints;
     if (existing && existing.gateApptId) {
-      // 修改路径
+      // 修改路径: 复用已有 visitId
       var aid = existing.gateApptId;
-      Object.assign(bookPayload, { visitId: aid, appointmentId: aid, id: aid });
+      Object.assign(bookPayload, { VisitId: aid, GateApptId: aid, Id: aid });
       endpoints = [
         { path: "/visitnextgen/UpdateVisit", type: "POST" },
+        { path: "/visitnextgen/SaveVisit", type: "POST" },
+        { path: "/visitnextgen/RescheduleVisit", type: "POST" },
         { path: "/Visit/UpdateAppointment", type: "POST" },
-        { path: "/Visit/ModifyAppointment", type: "POST" },
-        { path: "/Visit/ChangeSlot", type: "POST" },
-        { path: "/visitnextgen/RescheduleVisit", type: "POST" }
+        { path: "/Visit/ModifyAppointment", type: "POST" }
       ];
     } else {
       // 创建路径
       endpoints = [
+        { path: "/visitnextgen/SaveVisit", type: "POST" },
         { path: "/visitnextgen/CreateVisit", type: "POST" },
         { path: "/Visit/CreateAppointment", type: "POST" },
         { path: "/Visit/SubmitAppointment", type: "POST" },
-        { path: "/visitnextgen/BookAppointment", type: "POST" },
-        { path: "/Visit/Book", type: "POST" },
-        { path: "/Appointment/Create", type: "POST" }
+        { path: "/visitnextgen/BookAppointment", type: "POST" }
       ];
     }
 
@@ -1286,21 +1406,24 @@ class EModalClient extends TerminalClient {
         if (result2) {
           var ok = result2.success === true ||
             result2.appointmentId || result2.visitId || result2.id ||
-            (result2.data && (result2.data.appointmentId || result2.data.visitId || result2.data.id || result2.data.success === true)) ||
-            (result2.error === undefined && result2 !== null);
+            result2.gateApptId || result2.gateNbr ||
+            (result2.data && (result2.data.appointmentId || result2.data.visitId || result2.data.id || result2.data.gateApptId || result2.data.success === true)) ||
+            (result2.error === undefined && result2 !== null && typeof result2 !== 'string');
           if (ok) {
-            var apptId = result2.appointmentId || result2.visitId || result2.id || "";
-            if (!apptId && result2.data) apptId = result2.data.appointmentId || result2.data.visitId || result2.data.id || "";
+            var apptId = result2.appointmentId || result2.visitId || result2.id || result2.gateApptId || result2.gateNbr || "";
+            if (!apptId && result2.data) apptId = result2.data.appointmentId || result2.data.visitId || result2.data.id || result2.data.gateApptId || "";
             return {
               success: true,
               apptNo: String(apptId),
               time: time,
               date: date,
-              timeSlot: time
+              timeSlot: time,
+              endpoint: endpoints[ei].path
             };
           }
         }
       } catch (e) {
+        console.error('[EModal] createBooking endpoint ' + endpoints[ei].path + ' error:', e.message || e);
         lastError = e;
       }
     }
@@ -1315,17 +1438,53 @@ class EModalClient extends TerminalClient {
       return await this.callDrayDog("GET", "/appointments/with_container_info/?after=" + encodeURIComponent(after) + "&before=" + encodeURIComponent(before));
     }
 
+    // 日期格式: MM-DD-YYYY (按 API 文档要求)
     var today = new Date();
     var laOpts = { timeZone: "America/Los_Angeles", month: "2-digit", day: "2-digit", year: "numeric" };
     var laStr = today.toLocaleDateString("en-US", laOpts);
     var parts = laStr.split("/");
-    var fromDate = parts[0] + "/" + parts[1] + "/" + parts[2];
+    var fromDate = parts[0] + "-" + parts[1] + "-" + parts[2];
+
+    var futureDate = new Date(); futureDate.setDate(futureDate.getDate() + 30);
+    var laStr2 = futureDate.toLocaleDateString("en-US", laOpts);
+    var parts2 = laStr2.split("/");
+    var toDate = parts2[0] + "-" + parts2[1] + "-" + parts2[2];
+
     var conditions = [
-      { mem: "fc-busn-dt-from", vLow: fromDate, vHigh: "" }
+      { mem: "fc-busn-dt-from", vLow: fromDate, vHigh: "" },
+      { mem: "fc-busn-dt-to", vLow: toDate, vHigh: "" },
+      { mem: "fc-mto", vLow: "", vHigh: "" },
+      { mem: "fc-trk-co", vLow: "", vHigh: "" },
+      { mem: "fc-move-type", vLow: "", vHigh: "" },
+      { mem: "fc-appt-status", vLow: "C,W,F,D,P,U,X", vHigh: "" },
+      { mem: "fc-trk-plate", vLow: "", vHigh: "" },
+      { mem: "fc-ticket", vLow: "", vHigh: "" },
+      { mem: "fc-line-scac", vLow: "", vHigh: "" },
+      { mem: "fc-eqp-nbr", vLow: "", vHigh: "" },
+      { mem: "fc-ref-nbr", vLow: "", vHigh: "" },
+      { mem: "fc-eqp-iso", vLow: "", vHigh: "" },
+      { mem: "fc-is-checked-in", vLow: "", vHigh: "" },
+      { mem: "fc-is-single-dual", vLow: "", vHigh: "" },
+      { mem: "fc-df-src", vLow: "1", vHigh: "" }
     ];
     var payload = {
-      key: null, viewName: "VisitView", pageSize: 500, Page: 1,
-      conditions: conditions, sortFields: [], sortDirection: "asc"
+      key: null,
+      viewName: "VisitView",
+      pageSize: 500,
+      Page: 1,
+      conditions: conditions,
+      ordering: [],
+      quickSearchText: null,
+      jsonBookingSearchText: null,
+      jsonApptSlotscheduleSearch: null,
+      jsonApptImportContainerSearch: null,
+      SearchByAppointmentId: null,
+      SearchByVisitId: null,
+      CurrentViewId: "0",
+      poolId: 0,
+      fromDateTime: "",
+      toDateTime: "",
+      moveType: ""
     };
     return await this.callGateway("/Visit/SearchMyAppointments?csrch=", "POST", payload);
   }
