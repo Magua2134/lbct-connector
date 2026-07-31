@@ -655,7 +655,7 @@ class EModalClient extends TerminalClient {
   //         → 已经有本地会话 → 直接 302 回 truckerportal?code=...
   // Step 4: POST code → sso.emodal.com/connect/token 交换 access_token + refresh_token
   // ============================================================
-  static async loginWithCredentials(username, password) {
+  static async loginWithCredentials(username, password, captchaClient) {
     var allCookies = {};
     var ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
 
@@ -884,6 +884,35 @@ class EModalClient extends TerminalClient {
       step1Fields.submit = "next";
       if (!step1Fields.ReCapthaToken) step1Fields.ReCapthaToken = "";
 
+      // 检测并解决 reCAPTCHA（eModal 登录页可能有 reCAPTCHA v2/v3）
+      var loginSitekey = "";
+      var skMatch = keycloakFinalHtml.match(/data-sitekey=["']([^"']+)["']/i);
+      if (skMatch) loginSitekey = skMatch[1];
+      // 也检查 g-recaptcha div
+      if (!loginSitekey) {
+        var grMatch = keycloakFinalHtml.match(/g-recaptcha[^>]*data-sitekey=["']([^"']+)["']/i);
+        if (grMatch) loginSitekey = grMatch[1];
+      }
+      if (loginSitekey && captchaClient) {
+        console.log('[EModal] Step1: solving reCAPTCHA (sitekey=' + loginSitekey.slice(0,8) + '...)');
+        try {
+          var captchaRes = await captchaClient.solveRecaptchaV2({
+            sitekey: loginSitekey,
+            url: currentFinalUrl || "https://sso.emodal.com/Account/Login"
+          });
+          if (captchaRes && captchaRes.code) {
+            step1Fields.ReCapthaToken = captchaRes.code;
+            console.log('[EModal] Step1: reCAPTCHA solved, token_len=' + captchaRes.code.length);
+          } else {
+            console.warn('[EModal] Step1: reCAPTCHA solve returned empty');
+          }
+        } catch (ce) {
+          console.warn('[EModal] Step1: reCAPTCHA solve failed: ' + ce.message);
+        }
+      } else if (loginSitekey && !captchaClient) {
+        console.warn('[EModal] Step1: reCAPTCHA detected (sitekey=' + loginSitekey.slice(0,8) + '...) but no 2captcha client configured');
+      }
+
       var step1Url = currentFinalUrl;
       var step1Data = Object.keys(step1Fields).map(function(k) {
         return encodeURIComponent(k) + "=" + encodeURIComponent(step1Fields[k]);
@@ -993,6 +1022,36 @@ class EModalClient extends TerminalClient {
       if (!step2Fields.ReturnUrl && step1Fields.ReturnUrl) step2Fields.ReturnUrl = step1Fields.ReturnUrl;
       if (!step2Fields.ClientId && step1Fields.ClientId) step2Fields.ClientId = step1Fields.ClientId;
       if (!step2Fields.ReCapthaToken) step2Fields.ReCapthaToken = "";
+
+      // 检测密码页的 reCAPTCHA
+      var passSitekey = "";
+      var pskMatch = passHtml.match(/data-sitekey=["']([^"']+)["']/i);
+      if (pskMatch) passSitekey = pskMatch[1];
+      if (!passSitekey) {
+        var pgrMatch = passHtml.match(/g-recaptcha[^>]*data-sitekey=["']([^"']+)["']/i);
+        if (pgrMatch) passSitekey = pgrMatch[1];
+      }
+      if (passSitekey && captchaClient) {
+        console.log('[EModal] Step3: solving reCAPTCHA for password page (sitekey=' + passSitekey.slice(0,8) + '...)');
+        try {
+          var passCaptchaRes = await captchaClient.solveRecaptchaV2({
+            sitekey: passSitekey,
+            url: s2 ? (s2.finalUrl || "https://sso.emodal.com/Account/Login") : "https://sso.emodal.com/Account/Login"
+          });
+          if (passCaptchaRes && passCaptchaRes.code) {
+            step2Fields.ReCapthaToken = passCaptchaRes.code;
+            console.log('[EModal] Step3: reCAPTCHA solved, token_len=' + passCaptchaRes.code.length);
+          }
+        } catch (ce2) {
+          console.warn('[EModal] Step3: reCAPTCHA solve failed: ' + ce2.message);
+        }
+      } else if (passSitekey && !captchaClient) {
+        console.warn('[EModal] Step3: reCAPTCHA detected but no 2captcha client');
+      }
+      // 如果密码页没有sitekey但Step1已解过，复用Step1的token
+      if (!passSitekey && step1Fields.ReCapthaToken && step1Fields.ReCapthaToken.length > 10) {
+        step2Fields.ReCapthaToken = step1Fields.ReCapthaToken;
+      }
       if (!step2Fields.__RequestVerificationToken && step1Fields.__RequestVerificationToken) {
         step2Fields.__RequestVerificationToken = step1Fields.__RequestVerificationToken;
       }
@@ -2580,7 +2639,7 @@ async function getValidClient(username, password, authCookie) {
     throw { code: 401, message: 'No valid token or password provided. Please re-login from the account page.' };
   }
 
-  var loginResult = await EModalClient.loginWithCredentials(username, password);
+  var loginResult = await EModalClient.loginWithCredentials(username, password, twoCaptcha);
   if (!loginResult.success) {
     throw { code: 401, message: 'Login failed: ' + (loginResult.reason || 'unknown') };
   }
@@ -2654,7 +2713,7 @@ app.post('/api/emodal/login', async function(req, res) {
       });
     }
     // Not cached, perform login
-    var loginResult = await EModalClient.loginWithCredentials(username, password);
+    var loginResult = await EModalClient.loginWithCredentials(username, password, twoCaptcha);
     if (!loginResult.success) {
       return res.status(401).json({ success: false, reason: loginResult.reason || 'login failed' });
     }
