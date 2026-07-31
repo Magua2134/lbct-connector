@@ -3617,6 +3617,37 @@ app.post('/lbct/proxy-request', async function(req, res) {
   }
 });
 
+// ============================================
+// 远程更新端点：通过 HTTPS 触发 git pull + pm2 restart
+// 避免每次更新都需要 SSH 登录 VPS
+// ============================================
+app.post('/api/admin/update', async function(req, res) {
+  var execSync = require('child_process').execSync;
+  try {
+    console.log('[Deploy] 开始远程更新...');
+    var pullOut = execSync('cd /root/emodal-connector && git pull origin master 2>&1', { timeout: 30000, encoding: 'utf8' });
+    console.log('[Deploy] git pull:', pullOut);
+    var restartOut = execSync('pm2 restart emodal-connector 2>&1', { timeout: 15000, encoding: 'utf8' });
+    console.log('[Deploy] pm2 restart:', restartOut);
+    res.json({ success: true, pull: pullOut, restart: restartOut });
+  } catch(e) {
+    console.error('[Deploy] 更新失败:', e.message);
+    res.status(500).json({ success: false, error: e.message || String(e), stdout: e.stdout || '', stderr: e.stderr || '' });
+  }
+});
+
+// 远程状态查询
+app.get('/api/admin/status', async function(req, res) {
+  try {
+    var execSync = require('child_process').execSync;
+    var gitLog = execSync('cd /root/emodal-connector && git log --oneline -3 2>&1', { timeout: 10000, encoding: 'utf8' });
+    var pm2Status = execSync('pm2 list 2>&1', { timeout: 10000, encoding: 'utf8' });
+    res.json({ success: true, gitLog: gitLog, pm2: pm2Status });
+  } catch(e) {
+    res.status(500).json({ error: e.message || String(e) });
+  }
+});
+
 app.listen(PORT, function() {
   console.log('EModal Connector running on port ' + PORT);
   console.log('LBCT proxy endpoints available at /lbct/proxy and /lbct/proxy-request');
