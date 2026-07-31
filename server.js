@@ -3015,6 +3015,7 @@ app.post('/api/emodal/slots', async function(req, res) {
       }
 
       // 方式2: 直接调用 SearchMyAppointments 查询已有预约（WAF 可能不再拦截）
+      var bookingErr = null;
       try {
         console.log('[EModal] Trying getBooking (SearchMyAppointments) for container', container);
         var booking = await client.getBooking(container);
@@ -3030,7 +3031,8 @@ app.post('/api/emodal/slots', async function(req, res) {
           };
           return res.json({ success: true, slots: [], hasExistingAppointment: true, existingAppointment: apptInfo });
         }
-      } catch (bookingErr) {
+      } catch (err) {
+        bookingErr = err;
         console.log('[EModal] getBooking failed:', bookingErr.message || String(bookingErr));
       }
 
