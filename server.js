@@ -2705,6 +2705,249 @@ function _parseApptFromObject(obj, container) {
   };
 }
 
+// Debug endpoint: 测试不同参数组合查询时段
+app.post('/api/emodal/debug-slots', async function(req, res) {
+  var username = req.body && req.body.username;
+  var password = req.body && req.body.password;
+  var authCookie = req.body && req.body.authCookie;
+  var container = req.body && req.body.container;
+  var date = req.body && req.body.date;
+  if (!username || (!password && !authCookie)) {
+    return res.status(400).json({ error: 'username and (password or authCookie) required' });
+  }
+  if (!container || !date) {
+    return res.status(400).json({ error: 'container and date required' });
+  }
+  try {
+    var client = await getValidClient(username, password, authCookie);
+    var results = [];
+
+    // 日期转换
+    var isoDate = date;
+    try {
+      var dParts = date.replace(/-/g, "/").split("/");
+      if (dParts.length >= 3) {
+        isoDate = dParts[2] + "-" + dParts[0].padStart(2, "0") + "-" + dParts[1].padStart(2, "0") + "T00:00:00";
+      }
+    } catch (e) {}
+    var maxIsoDate = isoDate;
+    try {
+      var dt = new Date(isoDate);
+      dt.setDate(dt.getDate() + 14);
+      maxIsoDate = dt.getFullYear() + "-" + String(dt.getMonth() + 1).padStart(2, "0") + "-" + String(dt.getDate()).padStart(2, "0") + "T00:00:00";
+    } catch (e) {}
+
+    var token = client.accessToken;
+    var gatewayUrl = client.gatewayUrl;
+
+    // 测试1: 直接调用 truckerportal (不走 pregategateway)
+    var test1Data = {
+      "__type": "VisitNextGen.Models.ViewModels.AppointmentSlotsViewModel",
+      "AppointmentWindow": 0, "MoveType": "", "ContainerSize": null, "ContainerType": null,
+      "IsExport": false, "IsEmpty": false, "Tab": null, "Terminal": null, "GKEY": null,
+      "MinDate": isoDate, "MaxDate": maxIsoDate, "Carrier": null,
+      "ContainerNbr": container, "Container": container,
+      "GateApptId": null, "TargetTime": null, "VisitId": null
+    };
+    try {
+      var resp1 = await fetch("https://truckerportal.emodal.com/visitnextgen/GetAppointmentSlots", {
+        method: "POST",
+        headers: {
+          "Authorization": "Bearer " + token,
+          "Content-Type": "application/json",
+          "Accept": "application/json, text/javascript, */*; q=0.01",
+          "Origin": "https://truckerportal.emodal.com",
+          "Referer": "https://truckerportal.emodal.com/MyAppointments",
+          "X-Requested-With": "XMLHttpRequest"
+        },
+        body: JSON.stringify(test1Data)
+      });
+      var txt1 = await resp1.text().catch(function() { return ""; });
+      results.push({
+        test: "1-portal-direct-IsExport-false",
+        status: resp1.status,
+        body: txt1.slice(0, 2000)
+      });
+    } catch (e1) {
+      results.push({ test: "1-portal-direct-IsExport-false", error: e1.message || String(e1) });
+    }
+
+    // 测试2: 直接调用 truckerportal (IsExport=true)
+    var test2Data = JSON.parse(JSON.stringify(test1Data));
+    test2Data.IsExport = true;
+    try {
+      var resp2 = await fetch("https://truckerportal.emodal.com/visitnextgen/GetAppointmentSlots", {
+        method: "POST",
+        headers: {
+          "Authorization": "Bearer " + token,
+          "Content-Type": "application/json",
+          "Accept": "application/json, text/javascript, */*; q=0.01",
+          "Origin": "https://truckerportal.emodal.com",
+          "Referer": "https://truckerportal.emodal.com/MyAppointments",
+          "X-Requested-With": "XMLHttpRequest"
+        },
+        body: JSON.stringify(test2Data)
+      });
+      var txt2 = await resp2.text().catch(function() { return ""; });
+      results.push({
+        test: "2-portal-direct-IsExport-true",
+        status: resp2.status,
+        body: txt2.slice(0, 2000)
+      });
+    } catch (e2) {
+      results.push({ test: "2-portal-direct-IsExport-true", error: e2.message || String(e2) });
+    }
+
+    // 测试3: 通过 pregategateway (IsExport=false, 带__type)
+    try {
+      var payload3 = {
+        data: test1Data,
+        controllerPath: "/visitnextgen/GetAppointmentSlots",
+        requestType: "POST"
+      };
+      var resp3 = await fetch(gatewayUrl, {
+        method: "POST",
+        headers: {
+          "Authorization": "Bearer " + token,
+          "Content-Type": "application/json",
+          "Accept": "application/json, text/javascript, */*; q=0.01",
+          "Origin": "https://truckerportal.emodal.com",
+          "Referer": "https://truckerportal.emodal.com/",
+          "X-Requested-With": "XMLHttpRequest"
+        },
+        body: JSON.stringify(payload3)
+      });
+      var txt3 = await resp3.text().catch(function() { return ""; });
+      results.push({
+        test: "3-gateway-IsExport-false-with-type",
+        status: resp3.status,
+        body: txt3.slice(0, 2000)
+      });
+    } catch (e3) {
+      results.push({ test: "3-gateway-IsExport-false-with-type", error: e3.message || String(e3) });
+    }
+
+    // 测试4: 通过 pregategateway (不带__type字段)
+    var test4Data = JSON.parse(JSON.stringify(test1Data));
+    delete test4Data.__type;
+    try {
+      var payload4 = {
+        data: test4Data,
+        controllerPath: "/visitnextgen/GetAppointmentSlots",
+        requestType: "POST"
+      };
+      var resp4 = await fetch(gatewayUrl, {
+        method: "POST",
+        headers: {
+          "Authorization": "Bearer " + token,
+          "Content-Type": "application/json",
+          "Accept": "application/json, text/javascript, */*; q=0.01",
+          "Origin": "https://truckerportal.emodal.com",
+          "Referer": "https://truckerportal.emodal.com/",
+          "X-Requested-With": "XMLHttpRequest"
+        },
+        body: JSON.stringify(payload4)
+      });
+      var txt4 = await resp4.text().catch(function() { return ""; });
+      results.push({
+        test: "4-gateway-IsExport-false-no-type",
+        status: resp4.status,
+        body: txt4.slice(0, 2000)
+      });
+    } catch (e4) {
+      results.push({ test: "4-gateway-IsExport-false-no-type", error: e4.message || String(e4) });
+    }
+
+    // 测试5: 通过 pregategateway (data作为JSON字符串)
+    try {
+      var payload5 = {
+        data: JSON.stringify(test1Data),
+        controllerPath: "/visitnextgen/GetAppointmentSlots",
+        requestType: "POST"
+      };
+      var resp5 = await fetch(gatewayUrl, {
+        method: "POST",
+        headers: {
+          "Authorization": "Bearer " + token,
+          "Content-Type": "application/json",
+          "Accept": "application/json, text/javascript, */*; q=0.01",
+          "Origin": "https://truckerportal.emodal.com",
+          "Referer": "https://truckerportal.emodal.com/",
+          "X-Requested-With": "XMLHttpRequest"
+        },
+        body: JSON.stringify(payload5)
+      });
+      var txt5 = await resp5.text().catch(function() { return ""; });
+      results.push({
+        test: "5-gateway-data-as-string",
+        status: resp5.status,
+        body: txt5.slice(0, 2000)
+      });
+    } catch (e5) {
+      results.push({ test: "5-gateway-data-as-string", error: e5.message || String(e5) });
+    }
+
+    // 测试6: 直接调用 truckerportal (不带__type, IsExport=false)
+    var test6Data = JSON.parse(JSON.stringify(test1Data));
+    delete test6Data.__type;
+    try {
+      var resp6 = await fetch("https://truckerportal.emodal.com/visitnextgen/GetAppointmentSlots", {
+        method: "POST",
+        headers: {
+          "Authorization": "Bearer " + token,
+          "Content-Type": "application/json",
+          "Accept": "application/json, text/javascript, */*; q=0.01",
+          "Origin": "https://truckerportal.emodal.com",
+          "Referer": "https://truckerportal.emodal.com/MyAppointments",
+          "X-Requested-With": "XMLHttpRequest"
+        },
+        body: JSON.stringify(test6Data)
+      });
+      var txt6 = await resp6.text().catch(function() { return ""; });
+      results.push({
+        test: "6-portal-direct-no-type-IsExport-false",
+        status: resp6.status,
+        body: txt6.slice(0, 2000)
+      });
+    } catch (e6) {
+      results.push({ test: "6-portal-direct-no-type-IsExport-false", error: e6.message || String(e6) });
+    }
+
+    // 测试7: 通过 pregategateway (controllerPath 不带前导/)
+    try {
+      var payload7 = {
+        data: test1Data,
+        controllerPath: "visitnextgen/GetAppointmentSlots",
+        requestType: "POST"
+      };
+      var resp7 = await fetch(gatewayUrl, {
+        method: "POST",
+        headers: {
+          "Authorization": "Bearer " + token,
+          "Content-Type": "application/json",
+          "Accept": "application/json, text/javascript, */*; q=0.01",
+          "Origin": "https://truckerportal.emodal.com",
+          "Referer": "https://truckerportal.emodal.com/",
+          "X-Requested-With": "XMLHttpRequest"
+        },
+        body: JSON.stringify(payload7)
+      });
+      var txt7 = await resp7.text().catch(function() { return ""; });
+      results.push({
+        test: "7-gateway-no-leading-slash",
+        status: resp7.status,
+        body: txt7.slice(0, 2000)
+      });
+    } catch (e7) {
+      results.push({ test: "7-gateway-no-leading-slash", error: e7.message || String(e7) });
+    }
+
+    res.json({ success: true, container: container, date: date, isoDate: isoDate, results: results });
+  } catch (e) {
+    res.status(500).json({ error: e.message || String(e) });
+  }
+});
+
 // 4. Query available slots
 app.post('/api/emodal/slots', async function(req, res) {
   var username = req.body && req.body.username;
