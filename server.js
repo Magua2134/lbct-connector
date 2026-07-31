@@ -27,6 +27,38 @@ if (typeof globalThis.crypto === 'undefined') {
 }
 
 // ============================================
+// 全局 429 限流冷却机制
+// EModal API 一旦返回 429，在冷却期内拒绝所有新请求，避免请求叠加触发更严格的封禁
+// ============================================
+var _emodalRateLimit = {
+  // 按用户名隔离限流状态，不同用户互不影响
+  state: {}, // { username: { until: timestamp, reason: "rate_limited_after_retry", count: N } }
+  COOLDOWN_MS: 60000, // 默认冷却 60 秒
+  check(username) {
+    var s = this.state[username];
+    if (!s) return null;
+    if (Date.now() < s.until) {
+      return { reason: s.reason, remaining: s.until - Date.now() };
+    }
+    delete this.state[username];
+    return null;
+  },
+  trigger(username, reason, cooldownMs) {
+    var ms = cooldownMs || this.COOLDOWN_MS;
+    this.state[username] = {
+      until: Date.now() + ms,
+      reason: reason || "rate_limited",
+      count: (this.state[username] && this.state[username].count || 0) + 1
+    };
+    console.log('[RateLimit] ' + username + ' 触发限流冷却 ' + (ms / 1000) + 's (reason: ' + reason + ', count: ' + this.state[username].count + ')');
+  },
+  clear(username) {
+    delete this.state[username];
+    console.log('[RateLimit] ' + username + ' 限流冷却已清除');
+  }
+};
+
+// ============================================
 // Proxy support: route all outbound requests through a proxy
 // Set PROXY_URL env var (e.g., http://user:pass@proxy:port) to enable
 // ============================================
@@ -441,7 +473,11 @@ class EModalClient extends TerminalClient {
               headers: makeGatewayHeaders(this.accessToken),
               body: JSON.stringify(payload)
             });
-            if (resp3.status === 429) throw { code: 429, message: "rate_limited_after_retry" };
+            if (resp3.status === 429) {
+              // 重试后仍然 429: 触发全局限流冷却（90秒），避免后续请求继续叠加
+              if (this._username) _emodalRateLimit.trigger(this._username, "rate_limited_after_retry", 90000);
+              throw { code: 429, message: "rate_limited_after_retry" };
+            }
             if (resp3.status === 403) throw { code: 403, message: "HTTP 403: access_denied_by_waf" };
             var txt3 = await resp3.text().catch(function() { return ""; });
             if (!resp3.ok) throw { code: resp3.status, message: "HTTP " + resp3.status + ": " + txt3.slice(0, 200) };
@@ -455,8 +491,8 @@ class EModalClient extends TerminalClient {
         throw { code: 401, message: "token_expired" };
       }
       if (resp.status === 429) {
-        // 等待 Retry-After 秒后重试一次
-        var ra = parseInt(resp.headers.get("Retry-After") || "7", 10);
+        // 等待 Retry-After 秒后重试一次（延长等待时间，最少15秒）
+        var ra = Math.max(parseInt(resp.headers.get("Retry-After") || "15", 10), 15);
         console.log('[EModal] gateway 429, waiting ' + ra + 's and retrying...');
         await new Promise(function(r) { setTimeout(r, (ra + 1) * 1000); });
         var resp4 = await fetch(this.gatewayUrl, {
@@ -464,7 +500,11 @@ class EModalClient extends TerminalClient {
           headers: makeGatewayHeaders(this.accessToken),
           body: JSON.stringify(payload)
         });
-        if (resp4.status === 429) throw { code: 429, message: "rate_limited_after_retry" };
+        if (resp4.status === 429) {
+          // 重试后仍然 429: 触发全局限流冷却（90秒），避免后续请求继续叠加
+          if (this._username) _emodalRateLimit.trigger(this._username, "rate_limited_after_retry", 90000);
+          throw { code: 429, message: "rate_limited_after_retry" };
+        }
         if (resp4.status === 403) throw { code: 403, message: "HTTP 403: access_denied_by_waf" };
         var txt4 = await resp4.text().catch(function() { return ""; });
         if (!resp4.ok) throw { code: resp4.status, message: "HTTP " + resp4.status + ": " + txt4.slice(0, 200) };
@@ -1374,6 +1414,14 @@ class EModalClient extends TerminalClient {
         this._lastRawSlotsResult = { _error: e.message || String(e), _code: e.code || 0 };
         // 401: token过期，立即向上抛出，让端点级别的401重试逻辑触发（用用户名+密码重新登录）
         if (e && e.code === 401) throw e;
+        // 429: 限流了，不要再继续尝试 IsExport=true 和 fallback 端点
+        // 每多一次请求都会加重限流，甚至触发 IP 封禁
+        if (e && e.code === 429) {
+          console.warn('[EModal] getSlotsByDate 遇到 429 限流，停止后续请求（避免请求放大）');
+          // 直接返回限流错误，不走 fallback
+          this._lastRawSlotsResult = { _error: e.message || "rate_limited", _code: 429 };
+          return {};
+        }
       }
     }
 
@@ -2482,6 +2530,7 @@ async function getValidClient(username, password, authCookie) {
       password: cached.authCookie,
       token: cached.authCookie
     });
+    client._username = username; // 用于全局限流冷却追踪
     return client;
   }
 
@@ -2492,6 +2541,7 @@ async function getValidClient(username, password, authCookie) {
       password: authCookie,
       token: authCookie
     });
+    cookieClient._username = username; // 用于全局限流冷却追踪
     // Cache it for future use
     tokenCache.set(username, {
       accessToken: '',
@@ -2531,6 +2581,7 @@ async function getValidClient(username, password, authCookie) {
     password: newAuthCookie,
     token: newAuthCookie
   });
+  freshClient._username = username; // 用于全局限流冷却追踪
   freshClient._newAuthCookie = newAuthCookie; // 标记新token，供端点返回给Worker更新DB
   return freshClient;
 }
@@ -2966,6 +3017,19 @@ app.post('/api/emodal/slots', async function(req, res) {
   }
   if (!container || !date) {
     return res.status(400).json({ error: 'container and date required' });
+  }
+  // 检查全局限流冷却状态：如果该用户最近触发了 429，在冷却期内直接返回，不再发请求
+  var rl = _emodalRateLimit.check(username);
+  if (rl) {
+    console.log('[EModal] /slots 用户 ' + username + ' 处于限流冷却中，剩余 ' + Math.ceil(rl.remaining / 1000) + 's (reason: ' + rl.reason + ')');
+    return res.json({
+      success: true,
+      slots: [],
+      _debug_raw: JSON.stringify({ _error: rl.reason, _code: 429, _cooldown_remaining: Math.ceil(rl.remaining / 1000) }),
+      _debug_message: 'API Error: ' + rl.reason + ' (code: 429) — 限流冷却中，请 ' + Math.ceil(rl.remaining / 1000) + ' 秒后重试',
+      rate_limited: true,
+      cooldown_remaining: Math.ceil(rl.remaining / 1000)
+    });
   }
   try {
     var client = await getValidClient(username, password, authCookie);
