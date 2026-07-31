@@ -1372,6 +1372,8 @@ class EModalClient extends TerminalClient {
         lastError = e;
         // 记录错误信息到 _lastRawSlotsResult 供调试
         this._lastRawSlotsResult = { _error: e.message || String(e), _code: e.code || 0 };
+        // 401: token过期，立即向上抛出，让端点级别的401重试逻辑触发（用用户名+密码重新登录）
+        if (e && e.code === 401) throw e;
       }
     }
 
@@ -2524,11 +2526,13 @@ async function getValidClient(username, password, authCookie) {
     expiresAt: Date.now() + TOKEN_CACHE_TTL
   });
 
-  return new EModalClient({
+  var freshClient = new EModalClient({
     apiMode: 'native',
     password: newAuthCookie,
     token: newAuthCookie
   });
+  freshClient._newAuthCookie = newAuthCookie; // 标记新token，供端点返回给Worker更新DB
+  return freshClient;
 }
 
 // ============================================
@@ -2613,19 +2617,21 @@ app.post('/api/emodal/appointments', async function(req, res) {
   try {
     var client = await getValidClient(username, password, authCookie);
     var result;
+    var refreshedAuthCookie = null;
     try {
       result = await client.getAppointments();
     } catch (e) {
-      // If token expired (401), refresh/re-login and retry ONCE
+      // If token expired (401), force re-login with username+password
       if (e && e.code === 401) {
         tokenCache.delete(username);
-        client = await getValidClient(username, password, authCookie);
+        client = await getValidClient(username, password, null);
+        if (client._newAuthCookie) refreshedAuthCookie = client._newAuthCookie;
         result = await client.getAppointments();
       } else {
         throw e;
       }
     }
-    res.json({ success: true, appointments: result });
+    res.json({ success: true, appointments: result, refreshedAuthCookie: refreshedAuthCookie });
   } catch (e) {
     var code = (e && e.code) || 500;
     res.status(code).json({ error: e.message || String(e) });
@@ -2964,12 +2970,16 @@ app.post('/api/emodal/slots', async function(req, res) {
   try {
     var client = await getValidClient(username, password, authCookie);
     var result;
+    var refreshedAuthCookie = null;
     try {
       result = await client.getSlotsByDate(date, container, null, null);
     } catch (e) {
       if (e && e.code === 401) {
+        console.log('[EModal] /slots 401 token expired, force re-login with username+password');
         tokenCache.delete(username);
-        client = await getValidClient(username, password, authCookie);
+        // 不传authCookie，强制走用户名+密码重新登录路径
+        client = await getValidClient(username, password, null);
+        if (client._newAuthCookie) refreshedAuthCookie = client._newAuthCookie;
         result = await client.getSlotsByDate(date, container, null, null);
       } else {
         throw e;
@@ -3010,7 +3020,7 @@ app.post('/api/emodal/slots', async function(req, res) {
         var existingAppt = _extractExistingApptFromSlotsResult(rawSlotsResult, container);
         if (existingAppt) {
           console.log('[EModal] Found existing appointment from slots result:', JSON.stringify(existingAppt).slice(0, 500));
-          return res.json({ success: true, slots: [], hasExistingAppointment: true, existingAppointment: existingAppt });
+          return res.json({ success: true, slots: [], hasExistingAppointment: true, existingAppointment: existingAppt, refreshedAuthCookie: refreshedAuthCookie });
         }
       }
 
@@ -3029,7 +3039,7 @@ app.post('/api/emodal/slots', async function(req, res) {
             status: booking.status || "confirmed",
             apptNumber: booking.gateApptId || booking.apptNumber || ""
           };
-          return res.json({ success: true, slots: [], hasExistingAppointment: true, existingAppointment: apptInfo });
+          return res.json({ success: true, slots: [], hasExistingAppointment: true, existingAppointment: apptInfo, refreshedAuthCookie: refreshedAuthCookie });
         }
       } catch (err) {
         bookingErr = err;
@@ -3045,10 +3055,10 @@ app.post('/api/emodal/slots', async function(req, res) {
       if (bookingErr) {
         errorMsg += " | getBooking also failed: " + (bookingErr.message || String(bookingErr));
       }
-      return res.json({ success: true, slots: [], _debug_raw: debugInfo, _debug_message: errorMsg });
+      return res.json({ success: true, slots: [], _debug_raw: debugInfo, _debug_message: errorMsg, refreshedAuthCookie: refreshedAuthCookie });
     }
 
-    res.json({ success: true, slots: result });
+    res.json({ success: true, slots: result, refreshedAuthCookie: refreshedAuthCookie });
   } catch (e) {
     var code = (e && e.code) || 500;
     res.status(code).json({ error: e.message || String(e) });
@@ -3079,18 +3089,20 @@ app.post('/api/emodal/book', async function(req, res) {
     }
     if (terminal) options.terminal = terminal;
     var result;
+    var refreshedAuthCookie = null;
     try {
       result = await client.createBooking(container, date, time, options);
     } catch (e) {
       if (e && e.code === 401) {
         tokenCache.delete(username);
-        client = await getValidClient(username, password, authCookie);
+        client = await getValidClient(username, password, null);
+        if (client._newAuthCookie) refreshedAuthCookie = client._newAuthCookie;
         result = await client.createBooking(container, date, time, options);
       } else {
         throw e;
       }
     }
-    res.json({ success: true, result: result });
+    res.json({ success: true, result: result, refreshedAuthCookie: refreshedAuthCookie });
   } catch (e) {
     var code = (e && e.code) || 500;
     res.status(code).json({ error: e.message || String(e) });
@@ -3112,18 +3124,20 @@ app.post('/api/emodal/cancel', async function(req, res) {
   try {
     var client = await getValidClient(username, password, authCookie);
     var result;
+    var refreshedAuthCookie = null;
     try {
       result = await client.cancelAppointment(appointmentId);
     } catch (e) {
       if (e && e.code === 401) {
         tokenCache.delete(username);
-        client = await getValidClient(username, password, authCookie);
+        client = await getValidClient(username, password, null);
+        if (client._newAuthCookie) refreshedAuthCookie = client._newAuthCookie;
         result = await client.cancelAppointment(appointmentId);
       } else {
         throw e;
       }
     }
-    res.json({ success: true, result: result });
+    res.json({ success: true, result: result, refreshedAuthCookie: refreshedAuthCookie });
   } catch (e) {
     var code = (e && e.code) || 500;
     res.status(code).json({ error: e.message || String(e) });
