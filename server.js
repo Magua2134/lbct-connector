@@ -3082,6 +3082,23 @@ app.post('/api/emodal/slots', async function(req, res) {
     // Ensure slots is always an array
     // 使用 client._lastRawSlotsResult 获取原始 API 响应（getSlotsByDate 返回的是处理后的 slot map）
     var rawSlotsResult = client._lastRawSlotsResult || result;
+
+    // ===== 429 检测：如果 rawSlotsResult 包含 429 错误，触发限流冷却并返回 rate_limited 标志 =====
+    if (rawSlotsResult && typeof rawSlotsResult === 'object' && (rawSlotsResult._code === 429 || (rawSlotsResult._error && String(rawSlotsResult._error).indexOf('rate_limited') >= 0))) {
+      _emodalRateLimit.trigger(username, rawSlotsResult._error || 'rate_limited', 90000);
+      var rlRemain = 90;
+      var rlCheck = _emodalRateLimit.check(username);
+      if (rlCheck) rlRemain = Math.ceil(rlCheck.remaining / 1000);
+      console.log('[EModal] /slots 检测到429错误对象，触发限流冷却 90s (user=' + username + ')');
+      return res.json({
+        success: true,
+        slots: [],
+        rate_limited: true,
+        cooldown_remaining: rlRemain,
+        _debug_message: 'API限流中（429），冷却 ' + rlRemain + ' 秒后自动恢复'
+      });
+    }
+
     if (!Array.isArray(result)) {
       var slotArr = [];
       if (result && typeof result === 'object') {
