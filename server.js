@@ -1302,59 +1302,82 @@ class EModalClient extends TerminalClient {
     } catch (e) {}
 
     // 按 API 文档的 AppointmentSlotsViewModel 结构
-    var slotData = {
-      "__type": "VisitNextGen.Models.ViewModels.AppointmentSlotsViewModel",
-      "AppointmentWindow": 0,
-      "MoveType": "",
-      "ContainerSize": null,
-      "ContainerType": null,
-      "IsExport": true,
-      "IsEmpty": false,
-      "Tab": null,
-      "Terminal": null,
-      "GKEY": null,
-      "MinDate": isoDate,
-      "MaxDate": maxIsoDate,
-      "Carrier": null,
-      "ContainerNbr": containerNo,
-      "Container": containerNo,
-      "GateApptId": gateApptId || null,
-      "TargetTime": targetTime || null,
-      "VisitId": gateApptId || null
-    };
+    // 先尝试 IsExport=false (进口提柜/Pick-up)，再尝试 IsExport=true (出口)
+    // 因为大多数查询是提柜（进口），截图确认是 Pick-up load
+    var exportOptions = [false, true];
+    var lastError = null;
+    var lastRawResult = null;
 
-    try {
-      console.log('[EModal] getSlotsByDate calling /visitnextgen/GetAppointmentSlots with:', JSON.stringify(slotData).slice(0, 300));
-      var result = await this.callGateway("/visitnextgen/GetAppointmentSlots", "POST", slotData);
-      // 保存原始 API 响应，供 /api/emodal/slots 端点提取已有预约信息
-      this._lastRawSlotsResult = result;
-      console.log('[EModal] getSlotsByDate raw result type:', typeof result, 'isArray:', Array.isArray(result), 'keys:', result && typeof result === 'object' ? Object.keys(result).slice(0, 20).join(',') : '');
-      console.log('[EModal] getSlotsByDate raw result sample:', JSON.stringify(result).slice(0, 1500));
-      var slots = this._extractSlots(result);
-      console.log('[EModal] getSlotsByDate extracted slots count:', slots.length);
-      if (slots && slots.length > 0) {
-        return this._buildSlotMap(slots);
-      }
-      // 如果返回了数据但格式不同，尝试直接解析
-      if (result && typeof result === 'object' && !Array.isArray(result)) {
-        // 检查是否有内嵌的日期键 (按日期分组的时段)
-        var dateKeys = Object.keys(result);
-        var allSlots = [];
-        for (var dk = 0; dk < dateKeys.length; dk++) {
-          var dayData = result[dateKeys[dk]];
-          if (Array.isArray(dayData)) {
-            allSlots = allSlots.concat(dayData);
-          } else if (dayData && typeof dayData === 'object') {
-            if (dayData.slots) allSlots = allSlots.concat(dayData.slots);
-            if (dayData.Slots) allSlots = allSlots.concat(dayData.Slots);
+    for (var ei = 0; ei < exportOptions.length; ei++) {
+      var slotData = {
+        "__type": "VisitNextGen.Models.ViewModels.AppointmentSlotsViewModel",
+        "AppointmentWindow": 0,
+        "MoveType": "",
+        "ContainerSize": null,
+        "ContainerType": null,
+        "IsExport": exportOptions[ei],
+        "IsEmpty": false,
+        "Tab": null,
+        "Terminal": null,
+        "GKEY": null,
+        "MinDate": isoDate,
+        "MaxDate": maxIsoDate,
+        "Carrier": null,
+        "ContainerNbr": containerNo,
+        "Container": containerNo,
+        "GateApptId": gateApptId || null,
+        "TargetTime": targetTime || null,
+        "VisitId": gateApptId || null
+      };
+
+      try {
+        console.log('[EModal] getSlotsByDate attempt ' + (ei + 1) + ' (IsExport=' + exportOptions[ei] + ') calling /visitnextgen/GetAppointmentSlots');
+        console.log('[EModal] slotData:', JSON.stringify(slotData).slice(0, 400));
+        var result = await this.callGateway("/visitnextgen/GetAppointmentSlots", "POST", slotData);
+        // 保存原始 API 响应
+        lastRawResult = result;
+        this._lastRawSlotsResult = result;
+        console.log('[EModal] getSlotsByDate raw result type:', typeof result, 'isArray:', Array.isArray(result));
+        if (result && typeof result === 'object' && !Array.isArray(result)) {
+          console.log('[EModal] raw result keys:', Object.keys(result).slice(0, 20).join(','));
+        }
+        console.log('[EModal] raw result sample:', JSON.stringify(result).slice(0, 1500));
+
+        var slots = this._extractSlots(result);
+        console.log('[EModal] getSlotsByDate extracted slots count:', slots.length, '(IsExport=' + exportOptions[ei] + ')');
+        if (slots && slots.length > 0) {
+          return this._buildSlotMap(slots);
+        }
+        // 如果返回了数据但格式不同，尝试直接解析
+        if (result && typeof result === 'object' && !Array.isArray(result)) {
+          var dateKeys = Object.keys(result);
+          var allSlots = [];
+          for (var dk = 0; dk < dateKeys.length; dk++) {
+            var dayData = result[dateKeys[dk]];
+            if (Array.isArray(dayData)) {
+              allSlots = allSlots.concat(dayData);
+            } else if (dayData && typeof dayData === 'object') {
+              if (dayData.slots) allSlots = allSlots.concat(dayData.slots);
+              if (dayData.Slots) allSlots = allSlots.concat(dayData.Slots);
+            }
+          }
+          if (allSlots.length > 0) {
+            console.log('[EModal] found slots via date keys:', allSlots.length);
+            return this._buildSlotMap(allSlots);
           }
         }
-        if (allSlots.length > 0) {
-          return this._buildSlotMap(allSlots);
-        }
+        // IsExport=false 没找到时段，继续尝试 IsExport=true
+      } catch (e) {
+        console.error('[EModal] getSlotsByDate attempt ' + (ei + 1) + ' error:', e.message || e);
+        lastError = e;
+        // 记录错误信息到 _lastRawSlotsResult 供调试
+        this._lastRawSlotsResult = { _error: e.message || String(e), _code: e.code || 0 };
       }
-    } catch (e) {
-      console.error('[EModal] getSlotsByDate error:', e.message || e);
+    }
+
+    // 保存最后的错误信息供端点使用
+    if (lastError && !this._lastRawSlotsResult) {
+      this._lastRawSlotsResult = { _error: lastError.message || String(lastError), _code: lastError.code || 0 };
     }
 
     // Fallback: 尝试旧端点（兼容性）
@@ -2768,9 +2791,16 @@ app.post('/api/emodal/slots', async function(req, res) {
         console.log('[EModal] getBooking failed:', bookingErr.message || String(bookingErr));
       }
 
-      // 返回原始响应用于调试
+      // 返回原始响应和错误信息用于调试
       var debugInfo = rawSlotsResult ? JSON.stringify(rawSlotsResult).slice(0, 2000) : "null";
-      return res.json({ success: true, slots: [], _debug_raw: debugInfo, _debug_message: "No slots found and no existing appointment detected" });
+      var errorMsg = "No slots found and no existing appointment detected";
+      if (rawSlotsResult && rawSlotsResult._error) {
+        errorMsg = "API Error: " + rawSlotsResult._error + " (code: " + (rawSlotsResult._code || 'N/A') + ")";
+      }
+      if (bookingErr) {
+        errorMsg += " | getBooking also failed: " + (bookingErr.message || String(bookingErr));
+      }
+      return res.json({ success: true, slots: [], _debug_raw: debugInfo, _debug_message: errorMsg });
     }
 
     res.json({ success: true, slots: result });
