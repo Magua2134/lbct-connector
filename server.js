@@ -298,6 +298,17 @@ class EModalClient extends TerminalClient {
   // 策略：优先调用 truckerportal 原生端点（浏览器真实路径，WAF 最宽容，不易 403/429）
   // 仅当原生端点 404/405/endpoint 不支持时，才 fallback 到 pregategateway 方式
   async callGateway(controllerPath, requestType, data, extraPayload, skipPortal) {
+    // pregategateway-only 路径自动跳过 portal（按 API 文档，这些操作必须走 pregategateway）
+    var gatewayOnlyPaths = ["/visitnextgen/", "/Visit/SearchMyAppointments", "/Visit/GetAvailableSlots", "/visitnextgen/GetAppointmentSlots"];
+    if (!skipPortal) {
+      for (var gi = 0; gi < gatewayOnlyPaths.length; gi++) {
+        if (controllerPath.startsWith(gatewayOnlyPaths[gi]) || controllerPath.indexOf(gatewayOnlyPaths[gi]) >= 0) {
+          skipPortal = true;
+          break;
+        }
+      }
+    }
+
     // ---- 第一步：原生端点 (truckerportal.emodal.com) ----
     // 先假设原生端点支持这个路径，直接试
     var method = (requestType || "GET").toUpperCase();
@@ -354,7 +365,11 @@ class EModalClient extends TerminalClient {
         }
         throw { code: 401, message: "token_expired" };
       }
-      if (resp.status === 429) throw { code: 429, message: "rate_limited" };
+      if (resp.status === 429) {
+        // portal 限流了，不要直接 throw，让外层 fallback 到 pregategateway（不同域名，可能不限流）
+        console.log('[EModal] portal 429 rate_limited, falling back to pregategateway');
+        return { _portalUnsupported: true, _status: 429 };
+      }
       // 404/405：原生端点不支持（这个路径是 pregategateway 才有的），fallback
       if (resp.status === 404 || resp.status === 405) {
         return { _portalUnsupported: true, _status: resp.status };
@@ -416,7 +431,22 @@ class EModalClient extends TerminalClient {
             body: JSON.stringify(payload)
           });
           if (resp2.status === 401) throw { code: 401, message: "token_expired" };
-          if (resp2.status === 429) throw { code: 429, message: "rate_limited" };
+          if (resp2.status === 429) {
+            // 等待 Retry-After 秒后重试一次
+            var ra2 = parseInt(resp2.headers.get("Retry-After") || "7", 10);
+            console.log('[EModal] gateway 429, waiting ' + ra2 + 's and retrying...');
+            await new Promise(function(r) { setTimeout(r, (ra2 + 1) * 1000); });
+            var resp3 = await fetch(this.gatewayUrl, {
+              method: "POST",
+              headers: makeGatewayHeaders(this.accessToken),
+              body: JSON.stringify(payload)
+            });
+            if (resp3.status === 429) throw { code: 429, message: "rate_limited_after_retry" };
+            if (resp3.status === 403) throw { code: 403, message: "HTTP 403: access_denied_by_waf" };
+            var txt3 = await resp3.text().catch(function() { return ""; });
+            if (!resp3.ok) throw { code: resp3.status, message: "HTTP " + resp3.status + ": " + txt3.slice(0, 200) };
+            try { return JSON.parse(txt3); } catch (e) { return txt3; }
+          }
           if (resp2.status === 403) throw { code: 403, message: "HTTP 403: access_denied_by_waf" };
           var txt2 = await resp2.text().catch(function() { return ""; });
           if (!resp2.ok) throw { code: resp2.status, message: "HTTP " + resp2.status + ": " + txt2.slice(0, 200) };
@@ -424,7 +454,22 @@ class EModalClient extends TerminalClient {
         }
         throw { code: 401, message: "token_expired" };
       }
-      if (resp.status === 429) throw { code: 429, message: "rate_limited" };
+      if (resp.status === 429) {
+        // 等待 Retry-After 秒后重试一次
+        var ra = parseInt(resp.headers.get("Retry-After") || "7", 10);
+        console.log('[EModal] gateway 429, waiting ' + ra + 's and retrying...');
+        await new Promise(function(r) { setTimeout(r, (ra + 1) * 1000); });
+        var resp4 = await fetch(this.gatewayUrl, {
+          method: "POST",
+          headers: makeGatewayHeaders(this.accessToken),
+          body: JSON.stringify(payload)
+        });
+        if (resp4.status === 429) throw { code: 429, message: "rate_limited_after_retry" };
+        if (resp4.status === 403) throw { code: 403, message: "HTTP 403: access_denied_by_waf" };
+        var txt4 = await resp4.text().catch(function() { return ""; });
+        if (!resp4.ok) throw { code: resp4.status, message: "HTTP " + resp4.status + ": " + txt4.slice(0, 200) };
+        try { return JSON.parse(txt4); } catch (e) { return txt4; }
+      }
       if (resp.status === 403) throw { code: 403, message: "HTTP 403: access_denied_by_waf" };
       var txt = await resp.text().catch(function() { return ""; });
       if (!resp.ok) throw { code: resp.status, message: "HTTP " + resp.status + ": " + txt.slice(0, 200) };
@@ -1108,6 +1153,10 @@ class EModalClient extends TerminalClient {
         moveType: ""
       };
       var result = await this.callGateway("/Visit/SearchMyAppointments?csrch=", "POST", payload);
+      console.log('[EModal] getBooking SearchMyAppointments result type:', typeof result, 'isArray:', Array.isArray(result));
+      if (result && typeof result === 'object' && !Array.isArray(result)) {
+        console.log('[EModal] getBooking result keys:', Object.keys(result).slice(0, 15).join(','));
+      }
 
       var list = [];
       if (Array.isArray(result)) list = result;
@@ -1115,6 +1164,14 @@ class EModalClient extends TerminalClient {
       else if (result && result.results) list = result.results;
       else if (result && result.items) list = result.items;
       else if (result && result.rows) list = result.rows;
+      else if (result && result.Data) list = result.Data;
+      else if (result && result.Rows) list = result.Rows;
+
+      console.log('[EModal] getBooking list length:', list.length, 'searching for container:', container);
+      if (list.length > 0) {
+        console.log('[EModal] getBooking first item keys:', Object.keys(list[0]).slice(0, 15).join(','));
+        console.log('[EModal] getBooking first item sample:', JSON.stringify(list[0]).slice(0, 500));
+      }
 
       if (!list.length) return null;
 
@@ -1195,8 +1252,11 @@ class EModalClient extends TerminalClient {
     };
 
     try {
+      console.log('[EModal] getSlotsByDate calling /visitnextgen/GetAppointmentSlots with:', JSON.stringify(slotData).slice(0, 300));
       var result = await this.callGateway("/visitnextgen/GetAppointmentSlots", "POST", slotData);
+      console.log('[EModal] getSlotsByDate raw result type:', typeof result, 'isArray:', Array.isArray(result), 'keys:', result && typeof result === 'object' ? Object.keys(result).slice(0, 10).join(',') : '');
       var slots = this._extractSlots(result);
+      console.log('[EModal] getSlotsByDate extracted slots count:', slots.length);
       if (slots && slots.length > 0) {
         return this._buildSlotMap(slots);
       }
