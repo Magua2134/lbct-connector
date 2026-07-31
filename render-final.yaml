@@ -1,0 +1,23 @@
+services:
+  - type: web
+    name: lbct-connector-v2
+    runtime: node
+    repo: https://github.com/Magua2134/lbct-connector
+    branch: master
+    plan: free
+    region: oregon
+    buildCommand: npm install
+    startCommand: node server.js
+    autoDeploy: yes
+    envVars:
+      - key: NODE_VERSION
+        value: "20.14.0"
+      - key: PORT
+        value: "10000"
+      - key: CONNECTOR_API_KEY
+        # ⚠️ 不启用 API Key 校验（设为空字符串）。因为 Render 子域名本身即不公开
+        # 如果需要开启，取消下面这行注释并设置值
+        value: ""
+      - key: TWOCAPTCHA_API_KEY
+        value: "c8d3eaed3d58f4c8984d2a53c5cccd25"
+    healthCheckPath: /health

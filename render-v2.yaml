@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: emodal-connector-v2
+    runtime: node
+    repo: https://github.com/Magua2134/lbct-connector
+    branch: master
+    plan: free
+    region: oregon
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: NODE_VERSION
+        value: "20.14.0"
+      - key: PORT
+        value: "10000"
+      - key: CONNECTOR_API_KEY
+        sync: false
+      - key: TWOCAPTCHA_API_KEY
+        sync: false

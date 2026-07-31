@@ -1166,32 +1166,104 @@ class EModalClient extends TerminalClient {
       else if (result && result.rows) list = result.rows;
       else if (result && result.Data) list = result.Data;
       else if (result && result.Rows) list = result.Rows;
+      // 深度搜索：递归查找嵌套的数组
+      else if (result && typeof result === 'object') {
+        var _deepFind = function(obj, depth) {
+          if (depth > 3 || !obj || typeof obj !== 'object') return null;
+          var keys = Object.keys(obj);
+          for (var di = 0; di < keys.length; di++) {
+            var val = obj[keys[di]];
+            if (Array.isArray(val) && val.length > 0 && typeof val[0] === 'object') return val;
+            if (val && typeof val === 'object') {
+              var found = _deepFind(val, depth + 1);
+              if (found) return found;
+            }
+          }
+          return null;
+        };
+        var deepArr = _deepFind(result, 0);
+        if (deepArr) list = deepArr;
+      }
 
       console.log('[EModal] getBooking list length:', list.length, 'searching for container:', container);
       if (list.length > 0) {
-        console.log('[EModal] getBooking first item keys:', Object.keys(list[0]).slice(0, 15).join(','));
-        console.log('[EModal] getBooking first item sample:', JSON.stringify(list[0]).slice(0, 500));
+        console.log('[EModal] getBooking first item keys:', Object.keys(list[0]).slice(0, 20).join(','));
+        console.log('[EModal] getBooking first item sample:', JSON.stringify(list[0]).slice(0, 800));
       }
 
       if (!list.length) return null;
 
+      // 容器号匹配：先检查已知字段名，再全文搜索
       var cUp = String(container || "").toUpperCase();
+      var cClean = cUp.replace(/[^A-Z0-9]/g, '');
+      
+      // 提取容器号的辅助函数：检查所有已知字段名
+      var _getContainerFromItem = function(item) {
+        var fields = ['containerNo', 'containerNumber', 'container', 'cntrNbr', 'eqpNbr', 
+                      'equipmentNbr', 'cntr_no', 'fcEqpNbr', 'equipmentNumber', 'eqpNumber',
+                      'fcCntrNbr', 'CntrNbr', 'EqpNbr', 'EquipmentNbr', 'FC_EQP_NBR',
+                      'fc_eqp_nbr', 'cntrNo', 'container_no', 'container_nbr', 'eqp_no'];
+        for (var fi = 0; fi < fields.length; fi++) {
+          var val = item[fields[fi]];
+          if (val && String(val).toUpperCase().replace(/[^A-Z0-9]/g, '') === cClean) {
+            return String(val);
+          }
+        }
+        // 全文搜索：遍历所有字符串值找容器号
+        var allKeys = Object.keys(item);
+        for (var ki = 0; ki < allKeys.length; ki++) {
+          var v = item[allKeys[ki]];
+          if (typeof v === 'string' && v.toUpperCase().replace(/[^A-Z0-9]/g, '') === cClean && v.length >= 4) {
+            return v;
+          }
+          // 也检查嵌套对象
+          if (v && typeof v === 'object' && !Array.isArray(v)) {
+            var subKeys = Object.keys(v);
+            for (var si = 0; si < subKeys.length; si++) {
+              var sv = v[subKeys[si]];
+              if (typeof sv === 'string' && sv.toUpperCase().replace(/[^A-Z0-9]/g, '') === cClean && sv.length >= 4) {
+                return sv;
+              }
+            }
+          }
+        }
+        return null;
+      };
+
       for (var i = 0; i < list.length; i++) {
         var item = list[i];
-        var cc = (item.containerNo || item.containerNumber || item.container || item.cntrNbr || item.eqpNbr || item.equipmentNbr || item.cntr_no || "").toString().toUpperCase();
-        if (cc === cUp) {
+        var matchedContainer = _getContainerFromItem(item);
+        if (matchedContainer) {
           var id = item.visitId || item.appointmentId || item.id || item.visit_id || item.gateApptId || item.gateNbr || "";
           if (!id && item.rowId) id = item.rowId;
           if (!id && item.gkey) id = item.gkey;
+          if (!id && item.GKEY) id = item.GKEY;
+          if (!id && item.VisitId) id = item.VisitId;
+          if (!id && item.Id) id = item.Id;
+          console.log('[EModal] getBooking MATCHED container', matchedContainer, 'at index', i, 'id:', id);
           return {
             gateApptId: String(id),
             truckVisitApptId: 0,
-            container: container,
+            container: matchedContainer,
             raw: item,
-            appointmentTime: item.appointmentDate || item.date || item.businessDate || item.busnDt || "",
-            apptStatus: item.apptStatus || item.status || item.visitStatus || ""
+            appointmentTime: item.appointmentDate || item.date || item.businessDate || item.busnDt || item.fcBusnDt || item.busnDate || item.BusnDt || "",
+            apptStatus: item.apptStatus || item.status || item.visitStatus || item.fcApptStatus || item.ApptStatus || ""
           };
         }
+      }
+      // 如果列表中有结果但没有匹配到容器号，返回第一个（可能是API已按容器号过滤）
+      if (list.length > 0) {
+        var firstItem = list[0];
+        var firstId = firstItem.visitId || firstItem.appointmentId || firstItem.id || firstItem.visit_id || firstItem.gateApptId || firstItem.gateNbr || firstItem.rowId || firstItem.gkey || firstItem.GKEY || firstItem.VisitId || firstItem.Id || "";
+        console.log('[EModal] getBooking no exact match, using first item as fallback (API filtered by container)');
+        return {
+          gateApptId: String(firstId),
+          truckVisitApptId: 0,
+          container: container,
+          raw: firstItem,
+          appointmentTime: firstItem.appointmentDate || firstItem.date || firstItem.businessDate || firstItem.busnDt || firstItem.fcBusnDt || firstItem.busnDate || firstItem.BusnDt || "",
+          apptStatus: firstItem.apptStatus || firstItem.status || firstItem.visitStatus || firstItem.fcApptStatus || firstItem.ApptStatus || ""
+        };
       }
     } catch (e) {
       console.error('[EModal] getBooking error:', e.message || e);
@@ -2577,6 +2649,50 @@ app.post('/api/emodal/slots', async function(req, res) {
       }
       result = slotArr;
     }
+
+    // 如果没有可用时段，延迟后检测是否已有预约（避免连续调用被限流）
+    var existingAppt = null;
+    if (!result || result.length === 0) {
+      console.log('[EModal] slots empty for container', container, '- checking existing appointment...');
+      // 延迟 3 秒避免 pregategateway 限流
+      await new Promise(function(r) { setTimeout(r, 3000); });
+
+      for (var attempt = 0; attempt < 2 && !existingAppt; attempt++) {
+        try {
+          if (attempt > 0) {
+            var waitSec = 5 + attempt * 3;
+            console.log('[EModal] getBooking retry attempt', attempt, 'waiting', waitSec, 's');
+            await new Promise(function(r) { setTimeout(r, waitSec * 1000); });
+          }
+          existingAppt = await client.getBooking(container);
+        } catch (bookErr) {
+          console.error('[EModal] getBooking attempt', attempt, 'error:', bookErr.message || bookErr);
+          if (bookErr && bookErr.code === 429) {
+            // 限流了，等待更长时间后重试
+            continue;
+          }
+          break;
+        }
+      }
+
+      if (existingAppt) {
+        console.log('[EModal] Found existing appointment for', container, ':', JSON.stringify(existingAppt).slice(0, 500));
+        // 从 raw 中提取更多信息
+        var rawItem = existingAppt.raw || {};
+        var matchedAppt = {
+          id: existingAppt.gateApptId || rawItem.id || rawItem.gateApptId || rawItem.gateNbr || rawItem.visitId || rawItem.appointmentId || rawItem.gkey || rawItem.rowId || "",
+          container: container,
+          date: existingAppt.appointmentTime || rawItem.appointmentDate || rawItem.date || rawItem.businessDate || rawItem.busnDt || rawItem.apptDt || rawItem.fcBusnDt || rawItem.busnDate || "",
+          time: rawItem.appointmentTime || rawItem.time || rawItem.apptTime || rawItem.slotStartTime || rawItem.startTime || rawItem.fcApptTime || "",
+          status: existingAppt.apptStatus || rawItem.apptStatus || rawItem.status || rawItem.visitStatus || rawItem.fcApptStatus || "confirmed",
+          apptNumber: rawItem.appointmentNumber || rawItem.visitNumber || rawItem.confirmationNumber || rawItem.gateNbr || rawItem.ticketNbr || rawItem.fcTicket || rawItem.ticket || ""
+        };
+        return res.json({ success: true, slots: [], hasExistingAppointment: true, existingAppointment: matchedAppt });
+      } else {
+        console.log('[EModal] No existing appointment found for', container);
+      }
+    }
+
     res.json({ success: true, slots: result });
   } catch (e) {
     var code = (e && e.code) || 500;
