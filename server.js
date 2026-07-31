@@ -898,11 +898,11 @@ class EModalClient extends TerminalClient {
         try {
           var captchaRes = await captchaClient.solveRecaptchaV2({
             sitekey: loginSitekey,
-            url: currentFinalUrl || "https://sso.emodal.com/Account/Login"
+            pageUrl: currentFinalUrl || "https://sso.emodal.com/Account/Login"
           });
-          if (captchaRes && captchaRes.code) {
-            step1Fields.ReCapthaToken = captchaRes.code;
-            console.log('[EModal] Step1: reCAPTCHA solved, token_len=' + captchaRes.code.length);
+          if (captchaRes && captchaRes.response) {
+            step1Fields.ReCapthaToken = captchaRes.response;
+            console.log('[EModal] Step1: reCAPTCHA solved, token_len=' + captchaRes.response.length);
           } else {
             console.warn('[EModal] Step1: reCAPTCHA solve returned empty');
           }
@@ -1036,11 +1036,11 @@ class EModalClient extends TerminalClient {
         try {
           var passCaptchaRes = await captchaClient.solveRecaptchaV2({
             sitekey: passSitekey,
-            url: s2 ? (s2.finalUrl || "https://sso.emodal.com/Account/Login") : "https://sso.emodal.com/Account/Login"
+            pageUrl: s2 ? (s2.finalUrl || "https://sso.emodal.com/Account/Login") : "https://sso.emodal.com/Account/Login"
           });
-          if (passCaptchaRes && passCaptchaRes.code) {
-            step2Fields.ReCapthaToken = passCaptchaRes.code;
-            console.log('[EModal] Step3: reCAPTCHA solved, token_len=' + passCaptchaRes.code.length);
+          if (passCaptchaRes && passCaptchaRes.response) {
+            step2Fields.ReCapthaToken = passCaptchaRes.response;
+            console.log('[EModal] Step3: reCAPTCHA solved, token_len=' + passCaptchaRes.response.length);
           }
         } catch (ce2) {
           console.warn('[EModal] Step3: reCAPTCHA solve failed: ' + ce2.message);
