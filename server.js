@@ -1326,7 +1326,10 @@ class EModalClient extends TerminalClient {
     try {
       console.log('[EModal] getSlotsByDate calling /visitnextgen/GetAppointmentSlots with:', JSON.stringify(slotData).slice(0, 300));
       var result = await this.callGateway("/visitnextgen/GetAppointmentSlots", "POST", slotData);
-      console.log('[EModal] getSlotsByDate raw result type:', typeof result, 'isArray:', Array.isArray(result), 'keys:', result && typeof result === 'object' ? Object.keys(result).slice(0, 10).join(',') : '');
+      // 保存原始 API 响应，供 /api/emodal/slots 端点提取已有预约信息
+      this._lastRawSlotsResult = result;
+      console.log('[EModal] getSlotsByDate raw result type:', typeof result, 'isArray:', Array.isArray(result), 'keys:', result && typeof result === 'object' ? Object.keys(result).slice(0, 20).join(',') : '');
+      console.log('[EModal] getSlotsByDate raw result sample:', JSON.stringify(result).slice(0, 1500));
       var slots = this._extractSlots(result);
       console.log('[EModal] getSlotsByDate extracted slots count:', slots.length);
       if (slots && slots.length > 0) {
@@ -2707,7 +2710,8 @@ app.post('/api/emodal/slots', async function(req, res) {
       }
     }
     // Ensure slots is always an array
-    var rawSlotsResult = result; // 保存原始结果用于调试
+    // 使用 client._lastRawSlotsResult 获取原始 API 响应（getSlotsByDate 返回的是处理后的 slot map）
+    var rawSlotsResult = client._lastRawSlotsResult || result;
     if (!Array.isArray(result)) {
       var slotArr = [];
       if (result && typeof result === 'object') {
@@ -2724,24 +2728,49 @@ app.post('/api/emodal/slots', async function(req, res) {
       result = slotArr;
     }
 
-    // 如果没有可用时段，尝试从 GetAppointmentSlots 的原始响应中提取已有预约信息
-    // (SearchMyAppointments 端点被 WAF 封锁，不能直接调用)
+    // 如果没有可用时段，尝试多种方式检测已有预约
     if (!result || result.length === 0) {
-      console.log('[EModal] slots empty for container', container, '- examining raw result for appointment info...');
+      console.log('[EModal] slots empty for container', container, '- checking for existing appointment...');
       console.log('[EModal] rawSlotsResult type:', typeof rawSlotsResult, 'isArray:', Array.isArray(rawSlotsResult));
       if (rawSlotsResult && typeof rawSlotsResult === 'object') {
         console.log('[EModal] rawSlotsResult keys:', Object.keys(rawSlotsResult).slice(0, 20).join(','));
-        console.log('[EModal] rawSlotsResult sample:', JSON.stringify(rawSlotsResult).slice(0, 1000));
+        console.log('[EModal] rawSlotsResult sample:', JSON.stringify(rawSlotsResult).slice(0, 1500));
+      } else if (typeof rawSlotsResult === 'string') {
+        console.log('[EModal] rawSlotsResult is string:', rawSlotsResult.slice(0, 500));
+      }
 
-        // 尝试从原始响应中提取已有预约信息
+      // 方式1: 从 GetAppointmentSlots 的原始响应中提取已有预约信息
+      if (rawSlotsResult && typeof rawSlotsResult === 'object') {
         var existingAppt = _extractExistingApptFromSlotsResult(rawSlotsResult, container);
         if (existingAppt) {
           console.log('[EModal] Found existing appointment from slots result:', JSON.stringify(existingAppt).slice(0, 500));
           return res.json({ success: true, slots: [], hasExistingAppointment: true, existingAppointment: existingAppt });
         }
       }
+
+      // 方式2: 直接调用 SearchMyAppointments 查询已有预约（WAF 可能不再拦截）
+      try {
+        console.log('[EModal] Trying getBooking (SearchMyAppointments) for container', container);
+        var booking = await client.getBooking(container);
+        if (booking && booking.gateApptId) {
+          console.log('[EModal] Found existing appointment via getBooking:', JSON.stringify(booking).slice(0, 500));
+          var apptInfo = {
+            id: booking.gateApptId || booking.truckVisitApptId || "",
+            container: container,
+            date: booking.date || booking.appointmentDate || "",
+            time: booking.time || booking.appointmentTime || "",
+            status: booking.status || "confirmed",
+            apptNumber: booking.gateApptId || booking.apptNumber || ""
+          };
+          return res.json({ success: true, slots: [], hasExistingAppointment: true, existingAppointment: apptInfo });
+        }
+      } catch (bookingErr) {
+        console.log('[EModal] getBooking failed:', bookingErr.message || String(bookingErr));
+      }
+
       // 返回原始响应用于调试
-      return res.json({ success: true, slots: [], _debug_raw: JSON.stringify(rawSlotsResult).slice(0, 2000) });
+      var debugInfo = rawSlotsResult ? JSON.stringify(rawSlotsResult).slice(0, 2000) : "null";
+      return res.json({ success: true, slots: [], _debug_raw: debugInfo, _debug_message: "No slots found and no existing appointment detected" });
     }
 
     res.json({ success: true, slots: result });
