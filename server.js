@@ -34,6 +34,10 @@ var _emodalRateLimit = {
   // 按用户名隔离限流状态，不同用户互不影响
   state: {}, // { username: { until: timestamp, reason: "rate_limited_after_retry", count: N } }
   COOLDOWN_MS: 60000, // 默认冷却 60 秒
+  // 用户级请求节流：确保同一用户两次请求间至少间隔 MIN_INTERVAL_MS 毫秒
+  // 防止快速点击导致 API 请求叠加触发 429
+  lastReq: {}, // { username: timestamp }
+  MIN_INTERVAL_MS: 2000, // 最小请求间隔 2 秒
   check(username) {
     var s = this.state[username];
     if (!s) return null;
@@ -55,6 +59,20 @@ var _emodalRateLimit = {
   clear(username) {
     delete this.state[username];
     console.log('[RateLimit] ' + username + ' 限流冷却已清除');
+  },
+  // 节流：如果距离上次请求不足 MIN_INTERVAL_MS，返回需要等待的毫秒数
+  throttleCheck(username) {
+    var last = this.lastReq[username] || 0;
+    var now = Date.now();
+    var elapsed = now - last;
+    if (elapsed < this.MIN_INTERVAL_MS) {
+      return this.MIN_INTERVAL_MS - elapsed;
+    }
+    return 0;
+  },
+  // 标记请求时间
+  throttleMark(username) {
+    this.lastReq[username] = Date.now();
   }
 };
 
@@ -383,7 +401,10 @@ class EModalClient extends TerminalClient {
           }
           var resp2 = await fetch(url, fetchOpts2);
           if (resp2.status === 401) throw { code: 401, message: "token_expired" };
-          if (resp2.status === 429) throw { code: 429, message: "rate_limited" };
+          if (resp2.status === 429) {
+            if (this._username) _emodalRateLimit.trigger(this._username, "rate_limited_portal_retry", 90000);
+            throw { code: 429, message: "rate_limited" };
+          }
           // 404/405/403: 认为这个原生端点不支持/被拦，标记让外层 fallback 到 pregategateway
           if (resp2.status === 404 || resp2.status === 405) {
             return { _portalUnsupported: true, _status: resp2.status };
@@ -398,9 +419,11 @@ class EModalClient extends TerminalClient {
         throw { code: 401, message: "token_expired" };
       }
       if (resp.status === 429) {
-        // portal 限流了，不要直接 throw，让外层 fallback 到 pregategateway（不同域名，可能不限流）
-        console.log('[EModal] portal 429 rate_limited, falling back to pregategateway');
-        return { _portalUnsupported: true, _status: 429 };
+        // portal 限流了，直接触发冷却并抛出，不要 fallback 到 pregategateway
+        // 因为 portal 和 gateway 共享同一后端 API，portal 429 说明整个 API 已限流
+        // fallback 只会导致更多请求，加重限流
+        if (this._username) _emodalRateLimit.trigger(this._username, "rate_limited_portal", 90000);
+        throw { code: 429, message: "rate_limited" };
       }
       // 404/405：原生端点不支持（这个路径是 pregategateway 才有的），fallback
       if (resp.status === 404 || resp.status === 405) {
@@ -3031,6 +3054,13 @@ app.post('/api/emodal/slots', async function(req, res) {
       cooldown_remaining: Math.ceil(rl.remaining / 1000)
     });
   }
+  // 用户级请求节流：确保同一用户两次请求间至少间隔 2 秒，防止快速点击导致 API 请求叠加
+  var throttleWait = _emodalRateLimit.throttleCheck(username);
+  if (throttleWait > 0) {
+    console.log('[EModal] /slots 用户 ' + username + ' 请求节流：等待 ' + throttleWait + 'ms');
+    await new Promise(function(r) { setTimeout(r, throttleWait); });
+  }
+  _emodalRateLimit.throttleMark(username);
   try {
     var client = await getValidClient(username, password, authCookie);
     var result;
