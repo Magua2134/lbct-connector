@@ -3749,6 +3749,52 @@ app.get('/api/admin/status', async function(req, res) {
   }
 });
 
+// ============================================
+// 远程命令执行端点（用于VPS环境管理：Docker安装、Wechaty部署等）
+// 安全限制：只允许白名单命令前缀，需要API Key认证（已有全局中间件）
+// ============================================
+app.post('/api/admin/exec', async function(req, res) {
+  var execSync = require('child_process').execSync;
+  var cmd = req.body && req.body.cmd;
+  if (!cmd || typeof cmd !== 'string') {
+    return res.status(400).json({ success: false, error: 'Missing cmd parameter' });
+  }
+
+  // 命令白名单前缀（防止误删emodal-connector等危险操作）
+  var ALLOWED_PREFIXES = [
+    'docker', 'which docker', 'docker --version',
+    'uname', 'cat /etc/os-release', 'free', 'df -h',
+    'curl -fsSL', 'apt-get', 'apt update', 'apt install',
+    'pm2 ', 'pm2 list', 'pm2 start', 'pm2 restart', 'pm2 delete',
+    'node ', 'node -v', 'npm ', 'which node',
+    'ls ', 'ls -la', 'pwd', 'whoami', 'id',
+    'mkdir ', 'chmod ',
+    'netstat ', 'ss ',
+    'git ', 'systemctl ',
+    'wget ', 'tar ', 'cp ', 'mv ', 'rm -rf /opt/wechaty',
+    'cat /root/wechaty', 'cat /opt/wechaty'
+  ];
+
+  var cmdTrimmed = cmd.trim();
+  var isAllowed = ALLOWED_PREFIXES.some(function(prefix) {
+    return cmdTrimmed.startsWith(prefix);
+  });
+
+  if (!isAllowed) {
+    return res.status(403).json({ success: false, error: 'Command not in whitelist: ' + cmdTrimmed.substring(0, 50) });
+  }
+
+  try {
+    console.log('[Exec] Running: ' + cmdTrimmed.substring(0, 100));
+    var output = execSync(cmdTrimmed + ' 2>&1', { timeout: 120000, encoding: 'utf8', maxBuffer: 1024 * 1024 });
+    console.log('[Exec] Done, output length: ' + output.length);
+    res.json({ success: true, cmd: cmdTrimmed, output: output });
+  } catch(e) {
+    console.error('[Exec] Failed:', e.message);
+    res.status(500).json({ success: false, error: e.message || String(e), stdout: e.stdout || '', stderr: e.stderr || '' });
+  }
+});
+
 app.listen(PORT, function() {
   console.log('EModal Connector running on port ' + PORT);
   console.log('LBCT proxy endpoints available at /lbct/proxy and /lbct/proxy-request');
