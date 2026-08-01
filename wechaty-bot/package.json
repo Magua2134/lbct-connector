@@ -1,0 +1,18 @@
+{
+  "name": "wechaty-bot",
+  "version": "1.0.0",
+  "description": "Wechaty WeChat bot with REST API for Cloudflare Workers integration",
+  "main": "bot.js",
+  "scripts": {
+    "start": "node bot.js",
+    "start:prod": "WECHATY_LOG=info node bot.js"
+  },
+  "dependencies": {
+    "wechaty": "^1.20.2",
+    "wechaty-puppet-wechat": "^1.21.2",
+    "wechaty-puppet-wechat4u": "^1.13.6",
+    "qrcode-terminal": "^0.12.0",
+    "express": "^4.18.2",
+    "cors": "^2.8.5"
+  }
+}

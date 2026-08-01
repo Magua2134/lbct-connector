@@ -1,0 +1,27 @@
+version: '3.8'
+
+services:
+  wechaty-bot:
+    build: .
+    container_name: wechaty-bot
+    restart: always
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    environment:
+      - BOT_PORT=3000
+      - BOT_API_KEY=wechaty-bot-secret-2026
+      - WECHATY_LOG=info
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      interval: 60s
+      timeout: 10s
+      start_period: 30s
+      retries: 3
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
