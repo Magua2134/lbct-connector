@@ -3763,16 +3763,21 @@ app.post('/api/admin/exec', async function(req, res) {
   // 命令白名单前缀（防止误删emodal-connector等危险操作）
   var ALLOWED_PREFIXES = [
     'docker', 'which docker', 'docker --version',
-    'uname', 'cat /etc/os-release', 'free', 'df -h',
-    'curl -fsSL', 'apt-get', 'apt update', 'apt install',
-    'pm2 ', 'pm2 list', 'pm2 start', 'pm2 restart', 'pm2 delete',
+    'uname', 'cat /etc/os-release', 'cat /proc', 'free', 'df -h', 'cat /opt',
+    'curl -fsSL', 'apt-get', 'apt update', 'apt install', 'service ',
+    'pm2 ', 'pm2 list', 'pm2 start', 'pm2 restart', 'pm2 delete', 'pm2 save', 'pm2 startup',
     'node ', 'node -v', 'npm ', 'which node',
-    'ls ', 'ls -la', 'pwd', 'whoami', 'id',
-    'mkdir ', 'chmod ',
-    'netstat ', 'ss ',
-    'git ', 'systemctl ',
-    'wget ', 'tar ', 'cp ', 'mv ', 'rm -rf /opt/wechaty',
-    'cat /root/wechaty', 'cat /opt/wechaty'
+    'ls ', 'ls -la', 'ls -', 'pwd', 'whoami', 'id', 'echo ',
+    'mkdir ', 'chmod ', 'chown ',
+    'netstat ', 'ss ', 'ps ', 'kill ', 'nohup ',
+    'git ', 'systemctl ', 'systemctl restart', 'systemctl status', 'systemctl start', 'systemctl enable',
+    'wget ', 'tar ', 'cp ', 'mv ', 'rm -rf /opt/wechaty', 'rm -f /opt/wechaty',
+    'cat /root/wechaty', 'cat /opt/wechaty', 'cat /root/wechaty-bot',
+    'docker pull', 'docker run', 'docker stop', 'docker rm', 'docker logs', 'docker exec',
+    'docker build', 'docker images', 'docker container', 'docker network',
+    'bash -c', 'sh -c', 'sleep ',
+    'cat > /opt/wechaty', 'cat > /root/wechaty',
+    'export ', 'source '
   ];
 
   var cmdTrimmed = cmd.trim();
