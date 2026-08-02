@@ -4035,11 +4035,13 @@ class YTIConnectorClient {
       console.log("[YTI] ViewStateString decoded preview=" + decoded.slice(0, 200));
       var vsObj = JSON.parse(decoded);
       console.log("[YTI] ViewStateString parsed OK, keys=" + Object.keys(vsObj).join(",").slice(0, 200));
-      console.log("[YTI] VS before update: AvailableSlotCount=" + vsObj.AvailableSlotCount + ", TimeSlotKey=" + vsObj.TimeSlotKey);
+      console.log("[YTI] VS before update: AvailableSlotCount=" + vsObj.AvailableSlotCount + ", TimeSlotKey=" + vsObj.TimeSlotKey + ", MoveType=" + vsObj.MoveType);
       // 更新槽位状态字段为选中槽位的实际值
       vsObj.AvailableSlotCount = String(matchedSlot.availableCount || matchedSlot.capacity || "0");
       vsObj.TimeSlotKey = matchedSlot.fullKey || matchedSlot.id;
-      console.log("[YTI] VS after update: AvailableSlotCount=" + vsObj.AvailableSlotCount + ", TimeSlotKey=" + vsObj.TimeSlotKey);
+      // ★ 更新 MoveType 为实际操作类型（ImportsFullOut=提重柜, ImportsEmptyIn=还空柜）
+      vsObj.MoveType = moveType;
+      console.log("[YTI] VS after update: AvailableSlotCount=" + vsObj.AvailableSlotCount + ", TimeSlotKey=" + vsObj.TimeSlotKey + ", MoveType=" + vsObj.MoveType);
       updatedViewState = JSON.stringify(vsObj);
       vsParseOk = true;
     } catch(e) {
@@ -4076,20 +4078,36 @@ class YTIConnectorClient {
 
     var fullSlotKey = matchedSlot.fullKey || matchedSlot.id;
 
+    // ★ 关键修复：使用 YTI 表单实际的隐藏字段名
+    // 通过 /yti/debug 端点发现的实际表单结构：
+    // 1. 字段名是 "view-state"（不是 ContainerAppts[0].ViewStateString）
+    // 2. TruckerCode 在 ApptInfo 下（不是 ContainerAppts[0].TruckerCode）
+    // 3. 日期是 ContainerAppts[0].ApptInfo.NewApptDate（不是 SlotDate）
+    // 4. ContainerNumber/SscoCode/YardArea/MoveType 不作为独立字段，而是嵌入 view-state JSON
+    // 5. 必须发送 ApptInfo.ReqSequence、IsMarkedForDelete 等隐藏字段
     var saveData = {
-      "ContainerAppts[0].ContainerNumber": container,
-      "ContainerAppts[0].EqSizeType": importInfo.eqSizeType || "45G1",
-      "ContainerAppts[0].SscoCode": importInfo.sscoCode || "",
-      "ContainerAppts[0].YardArea": yardArea,
-      "ContainerAppts[0].MoveType": moveType,
+      // ★ view-state 是最关键字段，包含容器信息、堆场、船公司等
+      "view-state": updatedViewState,
+      // ★ ApptInfo 下的字段（实际表单中存在）
       "ContainerAppts[0].ApptInfo.NewTimeSlotKey": fullSlotKey,
-      "ContainerAppts[0].SlotId": matchedSlot.id,
-      "ContainerAppts[0].SlotDate": dateStr,
-      "ContainerAppts[0].SlotTime": time,
-      "ContainerAppts[0].ViewStateString": updatedViewState,
-      "ContainerAppts[0].TruckerCode": this.truckerCode,
-      "ContainerAppts[0].ApptId": hasExisting ? (existing.gateApptId || existing.apptNo || "0") : "0",
-      "ContainerAppts[0].SendNotification": "true"
+      "ContainerAppts[0].ApptInfo.NewApptDate": dateStr,
+      "ContainerAppts[0].ApptInfo.TruckerCode": this.truckerCode,
+      "ContainerAppts[0].ApptInfo.ReqSequence": "1",
+      "ContainerAppts[0].ApptInfo.GroupId": "0",
+      "ContainerAppts[0].ApptInfo.SubMoveId": "",
+      "ContainerAppts[0].ApptInfo.MainMoveId": "",
+      "ContainerAppts[0].ApptInfo.HasDualAppt": "False",
+      "ContainerAppts[0].ApptInfo.IsOutOfGauge": "False",
+      "ContainerAppts[0].ApptInfo.IsHazardous": "False",
+      "ContainerAppts[0].ApptInfo.IsReefer": "False",
+      "ContainerAppts[0].ApptInfo.IsWheeled": "False",
+      "ContainerAppts[0].ApptInfo.IsMarkedForDelete": "false",
+      // ★ 其他必需的隐藏字段
+      "ContainerAppts[0].NeedsAgreeOnDuplication": "False",
+      "IsEGApptRequiredForFullOut": "False",
+      "SendNotification": "true",
+      // 改约时需要 ApptId
+      "ContainerAppts[0].ApptId": hasExisting ? (existing.gateApptId || existing.apptNo || "0") : "0"
     };
 
     console.log("[YTI] SaveImport submit: slotKey=" + fullSlotKey + ", slotId=" + matchedSlot.id + ", yardArea=" + yardArea + ", moveType=" + moveType);
