@@ -2715,7 +2715,7 @@ app.use(function(req, res, next) {
 
 // 1. Health check
 app.get('/health', function(req, res) {
-  res.json({ ok: true, timestamp: Date.now(), version: "2026-08-02-v4" });
+  res.json({ ok: true, timestamp: Date.now(), version: "2026-08-02-v5" });
 });
 
 // 2. Login with credentials
