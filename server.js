@@ -3860,6 +3860,7 @@ class YTIConnectorClient {
     var vsMatch = html.match(/name=["']ContainerAppts\[0\]\.ViewStateString["'][^>]*value=["']([^"']*)["']/i);
     if (!vsMatch) vsMatch = html.match(/value=["']([^"']*)["'][^>]*name=["']ContainerAppts\[0\]\.ViewStateString["']/i);
     if (vsMatch) result.viewStateString = vsMatch[1];
+    console.log("[YTI] searchImport: container=" + containerNo + ", yardArea=" + result.yardArea + ", viewStateLen=" + (result.viewStateString || "").length + ", viewStatePreview=" + (result.viewStateString || "").slice(0, 150));
 
     var dataYardMatch = html.match(/data-yardarea=["']([^"']+)["']/i);
     if (dataYardMatch && !result.yardArea) result.yardArea = dataYardMatch[1];
@@ -4003,7 +4004,12 @@ class YTIConnectorClient {
     // ViewStateString 是一个 JSON 字符串（可能 HTML 编码），包含槽位状态信息
     // 必须将 AvailableSlotCount 和 TimeSlotKey 更新为选中槽位的实际值
     // 否则服务端校验失败并返回 HTTP 500
+    console.log("[YTI] createBooking: container=" + container + ", date=" + dateStr + ", time=" + time);
+    console.log("[YTI] createBooking: matchedSlot=", JSON.stringify({ id: matchedSlot.id, fullKey: matchedSlot.fullKey, availableCount: matchedSlot.availableCount, slot: matchedSlot.slot }));
+    console.log("[YTI] createBooking: raw viewStateString length=" + (viewStateString || "").length + ", preview=" + (viewStateString || "").slice(0, 200));
+
     var updatedViewState = viewStateString;
+    var vsParseOk = false;
     try {
       // HTML decode（&quot; → ", &amp; → & 等）
       var decoded = viewStateString
@@ -4012,15 +4018,47 @@ class YTIConnectorClient {
         .replace(/&lt;/g, '<')
         .replace(/&gt;/g, '>')
         .replace(/&#39;/g, "'");
+      console.log("[YTI] ViewStateString decoded preview=" + decoded.slice(0, 200));
       var vsObj = JSON.parse(decoded);
-      // 更新槽位状态字段
+      console.log("[YTI] ViewStateString parsed OK, keys=" + Object.keys(vsObj).join(",").slice(0, 200));
+      console.log("[YTI] VS before update: AvailableSlotCount=" + vsObj.AvailableSlotCount + ", TimeSlotKey=" + vsObj.TimeSlotKey);
+      // 更新槽位状态字段为选中槽位的实际值
       vsObj.AvailableSlotCount = String(matchedSlot.availableCount || matchedSlot.capacity || "0");
       vsObj.TimeSlotKey = matchedSlot.fullKey || matchedSlot.id;
+      console.log("[YTI] VS after update: AvailableSlotCount=" + vsObj.AvailableSlotCount + ", TimeSlotKey=" + vsObj.TimeSlotKey);
       updatedViewState = JSON.stringify(vsObj);
+      vsParseOk = true;
     } catch(e) {
-      // 如果解析失败，尝试直接替换字段值
-      console.log("[YTI] ViewStateString parse failed, using raw value:", e.message);
+      console.log("[YTI] ViewStateString JSON parse failed:", e.message, "trying string replacement fallback");
+      // 回退方案：直接用字符串替换更新字段值
+      try {
+        var decoded2 = viewStateString
+          .replace(/&quot;/g, '"')
+          .replace(/&amp;/g, '&')
+          .replace(/&lt;/g, '<')
+          .replace(/&gt;/g, '>')
+          .replace(/&#39;/g, "'");
+        var newSlotKey = matchedSlot.fullKey || matchedSlot.id;
+        var newAvailCount = String(matchedSlot.availableCount || matchedSlot.capacity || "0");
+        // 替换 AvailableSlotCount 的值
+        updatedViewState = decoded2
+          .replace(/("AvailableSlotCount"\s*:\s*")[^"]*"/, '$1' + newAvailCount + '"')
+          .replace(/("TimeSlotKey"\s*:\s*")[^"]*"/, '$1' + newSlotKey + '"');
+        if (updatedViewState !== decoded2) {
+          vsParseOk = true;
+          console.log("[YTI] ViewStateString string replacement succeeded");
+        } else {
+          console.log("[YTI] ViewStateString string replacement did not match any fields");
+        }
+      } catch(e2) {
+        console.log("[YTI] ViewStateString fallback also failed:", e2.message);
+      }
     }
+
+    if (!vsParseOk) {
+      console.log("[YTI] WARNING: ViewStateString was not updated, using raw value. This may cause HTTP 500.");
+    }
+    console.log("[YTI] createBooking: final updatedViewState length=" + (updatedViewState || "").length + ", preview=" + (updatedViewState || "").slice(0, 200));
 
     var fullSlotKey = matchedSlot.fullKey || matchedSlot.id;
 
@@ -4040,7 +4078,15 @@ class YTIConnectorClient {
       "ContainerAppts[0].SendNotification": "true"
     };
 
-    var resp = await this.call("POST", "/appointment/Appointment/SaveImport", saveData, "form");
+    console.log("[YTI] SaveImport submit: slotKey=" + fullSlotKey + ", slotId=" + matchedSlot.id + ", yardArea=" + yardArea + ", moveType=" + moveType);
+
+    var resp;
+    try {
+      resp = await this.call("POST", "/appointment/Appointment/SaveImport", saveData, "form");
+    } catch(callErr) {
+      console.log("[YTI] SaveImport call error: " + (callErr.message || JSON.stringify(callErr)).slice(0, 500));
+      throw callErr;
+    }
 
     if (typeof resp === "string") {
       if (resp.indexOf("Data has been saved") !== -1 || resp.indexOf("success") !== -1) {
