@@ -3919,16 +3919,26 @@ class YTIConnectorClient {
     if (typeof html !== "string") html = String(html);
 
     var slotMap = {};
+    // YTI slot 格式: slotId~time~capacity~startDate~endDate~availableCount
+    // 例如: 1324125~1500~100~08/04/2026~08/04/2026 16:00:00~5
     var slotPattern = /(\d+)~(\d{2,4})~(\d+)~([^~]+)~([^~]+)~(\d+)/g;
     var match;
     while ((match = slotPattern.exec(html)) !== null) {
-      var slotId = match[1];
-      var slotTime = match[2];
-      var capacity = match[6];
+      var fullKey = match[0];      // 完整 slot key
+      var slotId = match[1];       // slot ID
+      var slotTime = match[2];     // 时间 (如 1500)
+      var capacity = match[6];     // 可用数量
       var hour = slotTime.substring(0, slotTime.length - 2);
       var minute = slotTime.substring(slotTime.length - 2);
       var timeKey = hour.padStart(2, "0") + ":" + minute;
-      slotMap[timeKey] = { slot: timeKey + " (" + capacity + ")", id: slotId, gate: yardArea, yardArea: yardArea };
+      slotMap[timeKey] = {
+        slot: timeKey + " (" + capacity + ")",
+        id: slotId,
+        fullKey: fullKey,
+        availableCount: capacity,
+        gate: yardArea,
+        yardArea: yardArea
+      };
     }
 
     if (Object.keys(slotMap).length === 0) {
@@ -3938,7 +3948,13 @@ class YTIConnectorClient {
         var label = match[2].trim();
         var tm = label.match(/(\d{1,2}):(\d{2})/);
         if (tm && val) {
-          slotMap[tm[1].padStart(2,"0") + ":" + tm[2]] = { slot: label, id: val, gate: yardArea, yardArea: yardArea };
+          // 从 option value 中解析 availableCount
+          var optParts = val.split("~");
+          var optAvail = optParts.length >= 6 ? optParts[5] : "0";
+          slotMap[tm[1].padStart(2,"0") + ":" + tm[2]] = {
+            slot: label, id: val, fullKey: val, availableCount: optAvail,
+            gate: yardArea, yardArea: yardArea
+          };
         }
       }
     }
@@ -3983,19 +3999,45 @@ class YTIConnectorClient {
     var existing = options.existingAppt || null;
     var hasExisting = existing && (existing.apptNo || existing.gateApptId);
 
+    // ★ 关键修复：解析并更新 ViewStateString 中的 AvailableSlotCount 和 TimeSlotKey
+    // ViewStateString 是一个 JSON 字符串（可能 HTML 编码），包含槽位状态信息
+    // 必须将 AvailableSlotCount 和 TimeSlotKey 更新为选中槽位的实际值
+    // 否则服务端校验失败并返回 HTTP 500
+    var updatedViewState = viewStateString;
+    try {
+      // HTML decode（&quot; → ", &amp; → & 等）
+      var decoded = viewStateString
+        .replace(/&quot;/g, '"')
+        .replace(/&amp;/g, '&')
+        .replace(/&lt;/g, '<')
+        .replace(/&gt;/g, '>')
+        .replace(/&#39;/g, "'");
+      var vsObj = JSON.parse(decoded);
+      // 更新槽位状态字段
+      vsObj.AvailableSlotCount = String(matchedSlot.availableCount || matchedSlot.capacity || "0");
+      vsObj.TimeSlotKey = matchedSlot.fullKey || matchedSlot.id;
+      updatedViewState = JSON.stringify(vsObj);
+    } catch(e) {
+      // 如果解析失败，尝试直接替换字段值
+      console.log("[YTI] ViewStateString parse failed, using raw value:", e.message);
+    }
+
+    var fullSlotKey = matchedSlot.fullKey || matchedSlot.id;
+
     var saveData = {
       "ContainerAppts[0].ContainerNumber": container,
       "ContainerAppts[0].EqSizeType": importInfo.eqSizeType || "45G1",
       "ContainerAppts[0].SscoCode": importInfo.sscoCode || "",
       "ContainerAppts[0].YardArea": yardArea,
       "ContainerAppts[0].MoveType": moveType,
+      "ContainerAppts[0].ApptInfo.NewTimeSlotKey": fullSlotKey,
       "ContainerAppts[0].SlotId": matchedSlot.id,
       "ContainerAppts[0].SlotDate": dateStr,
       "ContainerAppts[0].SlotTime": time,
-      "ContainerAppts[0].ViewStateString": viewStateString,
+      "ContainerAppts[0].ViewStateString": updatedViewState,
       "ContainerAppts[0].TruckerCode": this.truckerCode,
-      "ContainerAppts[0].SendNotification": "true",
-      "ContainerAppts[0].ApptId": hasExisting ? (existing.gateApptId || existing.apptNo || "0") : "0"
+      "ContainerAppts[0].ApptId": hasExisting ? (existing.gateApptId || existing.apptNo || "0") : "0",
+      "ContainerAppts[0].SendNotification": "true"
     };
 
     var resp = await this.call("POST", "/appointment/Appointment/SaveImport", saveData, "form");
