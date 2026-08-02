@@ -3868,9 +3868,12 @@ class YTIConnectorClient {
     var yardMatch = html.match(/yardarea\s*[=:]\s*["']?([^"'\s&]+)/i);
     if (yardMatch) result.yardArea = yardMatch[1];
 
-    var vsMatch = html.match(/name=["']ContainerAppts\[0\]\.ViewStateString["'][^>]*value=["']([^"']*)["']/i);
-    if (!vsMatch) vsMatch = html.match(/value=["']([^"']*)["'][^>]*name=["']ContainerAppts\[0\]\.ViewStateString["']/i);
-    if (vsMatch) result.viewStateString = vsMatch[1];
+    // ★ 修复正则：使用反向引用(backreference)确保引号匹配
+    // 旧正则 [^"']* 会在单引号包裹的JSON值中截断（JSON含"字符时只取到第一个"）
+    // 新正则用 (["']) 捕获开引号，\1 匹配同种引号闭合
+    var vsMatch = html.match(/name=["']ContainerAppts\[0\]\.ViewStateString["'][^>]*value=(["'])([\s\S]*?)\1/i);
+    if (!vsMatch) vsMatch = html.match(/value=(["'])([\s\S]*?)\1[^>]*name=["']ContainerAppts\[0\]\.ViewStateString["']/i);
+    if (vsMatch) result.viewStateString = vsMatch[2];
     console.log("[YTI] searchImport: container=" + containerNo + ", yardArea=" + result.yardArea + ", viewStateLen=" + (result.viewStateString || "").length + ", viewStatePreview=" + (result.viewStateString || "").slice(0, 150));
 
     var dataYardMatch = html.match(/data-yardarea=["']([^"']+)["']/i);
@@ -4095,8 +4098,12 @@ class YTIConnectorClient {
     try {
       resp = await this.call("POST", "/appointment/Appointment/SaveImport", saveData, "form");
     } catch(callErr) {
-      console.log("[YTI] SaveImport call error: " + (callErr.message || JSON.stringify(callErr)).slice(0, 500));
-      throw callErr;
+      // ★ 增强错误诊断：把关键字段摘要附加到错误消息中
+      var diag = "VS_len=" + (updatedViewState || "").length + ",VS_ok=" + vsParseOk + ",slotKey=" + fullSlotKey + ",slotId=" + matchedSlot.id + ",yardArea=" + yardArea + ",eqSize=" + (importInfo.eqSizeType || "45G1");
+      var origMsg = callErr.message || JSON.stringify(callErr);
+      console.log("[YTI] SaveImport FAILED: " + origMsg.slice(0, 800) + " | DIAG: " + diag);
+      // 附加诊断信息到错误消息，用户在任务状态中可直接看到
+      throw { code: callErr.code || 500, message: origMsg + " [" + diag + "]" };
     }
 
     if (typeof resp === "string") {
