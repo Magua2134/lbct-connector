@@ -4078,17 +4078,27 @@ class YTIConnectorClient {
 
     var fullSlotKey = matchedSlot.fullKey || matchedSlot.id;
 
-    // ★ 关键修复：使用 YTI 表单实际的隐藏字段名
-    // 通过 /yti/debug 端点发现的实际表单结构：
-    // 1. 字段名是 "view-state"（不是 ContainerAppts[0].ViewStateString）
-    // 2. TruckerCode 在 ApptInfo 下（不是 ContainerAppts[0].TruckerCode）
-    // 3. 日期是 ContainerAppts[0].ApptInfo.NewApptDate（不是 SlotDate）
-    // 4. ContainerNumber/SscoCode/YardArea/MoveType 不作为独立字段，而是嵌入 view-state JSON
-    // 5. 必须发送 ApptInfo.ReqSequence、IsMarkedForDelete 等隐藏字段
+    // ★ 关键修复：完全复刻 YTI 表单的隐藏字段（通过 /yti/debug 端点发现）
+    // 之前遗漏了大量必需字段，导致 ASP.NET MVC 模型绑定失败返回 HTTP 500
     var saveData = {
       // ★ view-state 是最关键字段，包含容器信息、堆场、船公司等
       "view-state": updatedViewState,
-      // ★ ApptInfo 下的字段（实际表单中存在）
+      // ★ 顶层隐藏字段
+      "IsEGApptRequiredForFullOut": "False",
+      "SendNotification": "true",
+      "ProceedWithDuplicates": "False",
+      "chkMarkDeleteAll": "false",
+      // ★ Inquiry 字段（容器搜索状态）
+      "Inquiry.ViewMode": "",
+      "Inquiry.MoveType": "",
+      "Inquiry.ContainerNumber": container,
+      "Inquiry.ContainerNumbers": container,
+      "Inquiry.InquiryType": "Container",
+      "Inquiry.BlNumber": "",
+      "Inquiry.BlNumbers": "",
+      "Inquiry.CurrentBolNumber": "",
+      "Inquiry.VesselKey": "",
+      // ★ ApptInfo 下的字段（实际表单中存在的隐藏字段）
       "ContainerAppts[0].ApptInfo.NewTimeSlotKey": fullSlotKey,
       "ContainerAppts[0].ApptInfo.NewApptDate": dateStr,
       "ContainerAppts[0].ApptInfo.TruckerCode": this.truckerCode,
@@ -4102,12 +4112,20 @@ class YTIConnectorClient {
       "ContainerAppts[0].ApptInfo.IsReefer": "False",
       "ContainerAppts[0].ApptInfo.IsWheeled": "False",
       "ContainerAppts[0].ApptInfo.IsMarkedForDelete": "false",
-      // ★ 其他必需的隐藏字段
+      // ★ ContainerAppts 顶层字段
       "ContainerAppts[0].NeedsAgreeOnDuplication": "False",
-      "IsEGApptRequiredForFullOut": "False",
-      "SendNotification": "true",
-      // 改约时需要 ApptId
-      "ContainerAppts[0].ApptId": hasExisting ? (existing.gateApptId || existing.apptNo || "0") : "0"
+      "ContainerAppts[0].ApptId": hasExisting ? (existing.gateApptId || existing.apptNo || "0") : "0",
+      // ★ DualEmptyInApptInfo 字段（空柜还箱关联字段）
+      "ContainerAppts[0].DualEmptyInApptInfo.ApptInfo.NewApptDate": dateStr,
+      "ContainerAppts[0].DualEmptyInApptInfo.ApptInfo.NewTimeSlotKey": "",
+      "ContainerAppts[0].DualEmptyInApptInfo.ApptInfo.OldContainerNumber": "",
+      "ContainerAppts[0].DualEmptyInApptInfo.ApptInfo.OldSscoCode": "",
+      "ContainerAppts[0].DualEmptyInApptInfo.ApptInfo.TruckerCode": this.truckerCode,
+      // ★ 隐藏的容器尺寸字段
+      "hidden-cntr-len": "",
+      "hidden-cntr-type": "",
+      "hidden-cntr-ht": "",
+      "hidden-dual-ssco": ""
     };
 
     console.log("[YTI] SaveImport submit: slotKey=" + fullSlotKey + ", slotId=" + matchedSlot.id + ", yardArea=" + yardArea + ", moveType=" + moveType);
