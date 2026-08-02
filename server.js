@@ -3750,7 +3750,18 @@ class YTIConnectorClient {
       if (contentType === "form") {
         headers["Content-Type"] = "application/x-www-form-urlencoded";
         headers["X-Requested-With"] = "XMLHttpRequest";
-        opts.body = new URLSearchParams(data).toString();
+        // ★ 手动编码表单数据，保留 [ ] . 等字符不编码
+        // URLSearchParams 会把 ContainerAppts[0] 编码为 ContainerAppts%5B0%5D
+        // ASP.NET MVC 模型绑定器期望原始的 ContainerAppts[0] 格式
+        var formParts = [];
+        for (var formKey in data) {
+          if (data.hasOwnProperty(formKey)) {
+            // 只编码值，不编码 key 中的 [ ] . 等字符
+            var formVal = String(data[formKey] === null || data[formKey] === undefined ? "" : data[formKey]);
+            formParts.push(formKey + "=" + encodeURIComponent(formVal));
+          }
+        }
+        opts.body = formParts.join("&");
       } else {
         headers["Content-Type"] = "application/json";
         opts.body = JSON.stringify(data);
