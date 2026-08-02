@@ -2715,7 +2715,7 @@ app.use(function(req, res, next) {
 
 // 1. Health check
 app.get('/health', function(req, res) {
-  res.json({ ok: true, timestamp: Date.now(), version: "2026-08-02-v5" });
+  res.json({ ok: true, timestamp: Date.now(), version: "2026-08-02-v6" });
 });
 
 // 2. Login with credentials
@@ -3736,6 +3736,7 @@ class YTIConnectorClient {
     this.password = config.password || "";
     this.cookieStr = config.cookie || "";
     this.verified = false;
+    this.antiForgeryToken = ""; // ★ 从主页提取的 ASP.NET 防伪 token
   }
 
   async call(method, path, data, contentType) {
@@ -3845,7 +3846,27 @@ class YTIConnectorClient {
     }
 
     try { await this.call("GET", "/account/Account/SelectApplication?siteId=" + this.siteId); } catch(e) {}
-    try { await this.call("GET", "/?_=" + Date.now()); } catch(e) {}
+
+    // ★ 修复：从主页提取 truckerCode 和 __RequestVerificationToken
+    var mainHtml = "";
+    try { mainHtml = await this.call("GET", "/?_=" + Date.now()); } catch(e) {}
+    if (typeof mainHtml === "string" && mainHtml.length > 0) {
+      // 提取 truckerCode（多种方式）
+      var tcMatch = mainHtml.match(/truckerCode\s*[=:]\s*["']?([^"'\s&;<]+)/i);
+      if (tcMatch && tcMatch[1]) this.truckerCode = tcMatch[1];
+      var tcHidden = mainHtml.match(/name=["']TruckerCode["'][^>]*value=["']([^"']*)["']/i);
+      if (tcHidden && tcHidden[1]) this.truckerCode = tcHidden[1];
+      var tcData = mainHtml.match(/data-truckercode=["']([^"']+)["']/i);
+      if (tcData && tcData[1]) this.truckerCode = tcData[1];
+      console.log("[YTI] login: extracted truckerCode=" + this.truckerCode);
+
+      // 提取 __RequestVerificationToken
+      var afMatch = mainHtml.match(/name=["']__RequestVerificationToken["'][^>]*value=["']([^"']+)["']/i);
+      if (afMatch && afMatch[1]) {
+        this.antiForgeryToken = afMatch[1];
+        console.log("[YTI] login: extracted antiForgeryToken (len=" + this.antiForgeryToken.length + ")");
+      }
+    }
 
     this.verified = true;
     return { success: true, cookie: this.cookieStr };
@@ -3884,6 +3905,24 @@ class YTIConnectorClient {
 
     var sscoMatch = html.match(/name=["']ContainerAppts\[0\]\.SscoCode["'][^>]*value=["']([^"']*)["']/i);
     if (sscoMatch) result.sscoCode = sscoMatch[1];
+
+    // ★ 修复：从 searchImport 页面也尝试提取 antiForgeryToken（作为备选）
+    if (!this.antiForgeryToken) {
+      var afMatch2 = html.match(/name=["']__RequestVerificationToken["'][^>]*value=["']([^"']+)["']/i);
+      if (afMatch2 && afMatch2[1]) {
+        this.antiForgeryToken = afMatch2[1];
+        console.log("[YTI] searchImport: extracted antiForgeryToken (len=" + this.antiForgeryToken.length + ")");
+      }
+    }
+
+    // ★ 修复：从 searchImport 页面也尝试提取 truckerCode（作为备选）
+    if (this.truckerCode === "MGQD") {
+      var tcInSearch = html.match(/name=["']ContainerAppts\[0\]\.TruckerCode["'][^>]*value=["']([^"']*)["']/i);
+      if (tcInSearch && tcInSearch[1]) {
+        this.truckerCode = tcInSearch[1];
+        console.log("[YTI] searchImport: extracted truckerCode=" + this.truckerCode);
+      }
+    }
 
     if (html.indexOf("Available") !== -1 || html.indexOf("available") !== -1) {
       result.available = true;
@@ -4084,6 +4123,8 @@ class YTIConnectorClient {
     var saveData = {
       // ★ view-state 是最关键字段，包含容器信息、堆场、船公司等
       "view-state": updatedViewState,
+      // ★ ASP.NET 防伪 token（如果提取到则提交）
+      "__RequestVerificationToken": this.antiForgeryToken || "",
       // ★ 顶层隐藏字段
       "IsEGApptRequiredForFullOut": "False",
       "SendNotification": "true",
@@ -4116,6 +4157,10 @@ class YTIConnectorClient {
       // ★ ContainerAppts 顶层字段
       "ContainerAppts[0].NeedsAgreeOnDuplication": "False",
       "ContainerAppts[0].ApptId": hasExisting ? (existing.gateApptId || existing.apptNo || "0") : "0",
+      // ★ 补全 ContainerAppts 顶层隐藏字段（searchImport 提取的值）
+      "ContainerAppts[0].EqSizeType": importInfo.eqSizeType || "",
+      "ContainerAppts[0].SscoCode": importInfo.sscoCode || "",
+      "ContainerAppts[0].ContainerNumber": container,
       // ★ DualEmptyInApptInfo 字段（空柜还箱关联字段）
       "ContainerAppts[0].DualEmptyInApptInfo.ApptInfo.NewApptDate": dateStr,
       "ContainerAppts[0].DualEmptyInApptInfo.ApptInfo.NewTimeSlotKey": "",
