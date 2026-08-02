@@ -4292,6 +4292,108 @@ app.post('/yti/appointments', async function(req, res) {
   }
 });
 
+// Y6: 调试端点 - 返回完整 HTML 和隐藏字段
+app.post('/yti/debug', async function(req, res) {
+  var username = req.body && req.body.username;
+  var password = req.body && req.body.password;
+  var container = (req.body && req.body.container) || "WHSU9026050";
+  if (!username || !password) return res.status(400).json({ error: 'username and password required' });
+  try {
+    var client = await getValidYtiClient(username, password, false);
+
+    // 1. 获取主页 HTML
+    var mainHtml = "";
+    try { mainHtml = await client.call("GET", "/?_=" + Date.now()); } catch(e) { mainHtml = String(e); }
+    if (typeof mainHtml !== "string") mainHtml = String(mainHtml);
+
+    // 2. 从主页提取 truckerCode
+    var truckerCodeMatch = mainHtml.match(/truckerCode\s*[=:]\s*["']?([^"'\s&;<]+)/i);
+    var truckerCodeFromPage = truckerCodeMatch ? truckerCodeMatch[1] : "";
+    // 也尝试从 hidden input 或 data 属性提取
+    var tcHidden = mainHtml.match(/name=["']TruckerCode["'][^>]*value=["']([^"']*)["']/i);
+    var tcData = mainHtml.match(/data-truckercode=["']([^"']+)["']/i);
+    var tcVar = mainHtml.match(/var\s+truckerCode\s*=\s*["']([^"']+)["']/i);
+
+    // 3. 获取 searchImport 完整 HTML
+    var searchHtml = await client.call("GET", "/appointment/Appointment/SearchImport?ContainerNumber=" + container + "&_=" + Date.now());
+    if (typeof searchHtml !== "string") searchHtml = String(searchHtml);
+
+    // 4. 提取所有 hidden input 字段
+    var hiddenFields = {};
+    var hiddenPattern = /<input[^>]*type=["']hidden["'][^>]*>/gi;
+    var inputMatch;
+    while ((inputMatch = hiddenPattern.exec(searchHtml)) !== null) {
+      var tag = inputMatch[0];
+      var nameMatch = tag.match(/name=["']([^"']+)["']/i);
+      var valueMatch = tag.match(/value=["']([^"']*)["']/i);
+      if (nameMatch) {
+        hiddenFields[nameMatch[1]] = valueMatch ? valueMatch[1] : "";
+      }
+    }
+
+    // 5. 也从主页提取 hidden input
+    var mainHiddenFields = {};
+    var hiddenPattern2 = /<input[^>]*type=["']hidden["'][^>]*>/gi;
+    while ((inputMatch = hiddenPattern2.exec(mainHtml)) !== null) {
+      var tag2 = inputMatch[0];
+      var nameMatch2 = tag2.match(/name=["']([^"']+)["']/i);
+      var valueMatch2 = tag2.match(/value=["']([^"']*)["']/i);
+      if (nameMatch2) {
+        mainHiddenFields[nameMatch2[1]] = valueMatch2 ? valueMatch2[1] : "";
+      }
+    }
+
+    // 6. 查找 anti-forgery token
+    var afToken = "";
+    var afMatch = searchHtml.match(/name=["']__RequestVerificationToken["'][^>]*value=["']([^"']+)["']/i);
+    if (!afMatch) afMatch = mainHtml.match(/name=["']__RequestVerificationToken["'][^>]*value=["']([^"']+)["']/i);
+    if (afMatch) afToken = afMatch[1];
+
+    // 7. 查找 truckerCode 在 searchImport HTML 中
+    var tcInSearch = searchHtml.match(/truckerCode\s*[=:]\s*["']?([^"'\s&;<]+)/i);
+    var tcHiddenInSearch = searchHtml.match(/name=["']ContainerAppts\[0\]\.TruckerCode["'][^>]*value=["']([^"']*)["']/i);
+
+    // 8. 查找所有包含 ContainerAppts 的 input
+    var containerInputs = {};
+    var ciPattern = /<input[^>]*name=["']ContainerAppts[^"']*["'][^>]*>/gi;
+    var ciMatch;
+    while ((ciMatch = ciPattern.exec(searchHtml)) !== null) {
+      var ciTag = ciMatch[0];
+      var ciName = ciTag.match(/name=["']([^"']+)["']/i);
+      var ciValue = ciTag.match(/value=(["'])([\s\S]*?)\1/i);
+      if (ciName) {
+        containerInputs[ciName[1]] = ciValue ? ciValue[2] : "";
+      }
+    }
+
+    res.json({
+      success: true,
+      debug: {
+        mainPageLength: mainHtml.length,
+        searchPageLength: searchHtml.length,
+        truckerCode: {
+          fromPage: truckerCodeFromPage,
+          fromHidden: tcHidden ? tcHidden[1] : "",
+          fromData: tcData ? tcData[1] : "",
+          fromVar: tcVar ? tcVar[1] : "",
+          fromSearch: tcInSearch ? tcInSearch[1] : "",
+          fromSearchHidden: tcHiddenInSearch ? tcHiddenInSearch[1] : ""
+        },
+        antiForgeryToken: afToken ? afToken.substring(0, 50) + "..." : "",
+        hiddenFields: hiddenFields,
+        mainHiddenFields: mainHiddenFields,
+        containerInputs: containerInputs,
+        mainHtmlPreview: mainHtml.substring(0, 2000),
+        searchHtmlPreview: searchHtml.substring(0, 2000),
+        searchHtmlFull: searchHtml
+      }
+    });
+  } catch (e) {
+    var code5 = (e && e.code) || 500;
+    res.status(code5).json({ error: e.message || String(e) });
+  }
+});
+
 // ============================================
 // 远程更新端点：通过 HTTPS 触发 git pull + pm2 restart
 // 避免每次更新都需要 SSH 登录 VPS
