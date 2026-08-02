@@ -3719,6 +3719,474 @@ app.post('/lbct/proxy-request', async function(req, res) {
 });
 
 // ============================================
+// YTI Connector (cap.yti.com - Yusen Terminals LLC)
+// ASP.NET Forms 认证，HTML 响应解析
+// 在 VPS 上运行以解决 Cloudflare Workers 无法直连 cap.yti.com 的问题
+// ============================================
+var ytiCookieCache = new Map();
+var YTI_COOKIE_TTL = 25 * 60 * 1000; // 25 分钟
+
+class YTIConnectorClient {
+  constructor(config) {
+    config = config || {};
+    this.baseUrl = "https://cap.yti.com";
+    this.siteId = config.siteId || "YTI_LA";
+    this.truckerCode = config.truckerCode || config.truck_plate || "MGQD";
+    this.username = config.username || "";
+    this.password = config.password || "";
+    this.cookieStr = config.cookie || "";
+    this.verified = false;
+  }
+
+  async call(method, path, data, contentType) {
+    var headers = {
+      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+    };
+    if (this.cookieStr) headers["Cookie"] = this.cookieStr;
+
+    var opts = { method: method, headers: headers, redirect: "manual" };
+
+    if (data) {
+      if (contentType === "form") {
+        headers["Content-Type"] = "application/x-www-form-urlencoded";
+        headers["X-Requested-With"] = "XMLHttpRequest";
+        opts.body = new URLSearchParams(data).toString();
+      } else {
+        headers["Content-Type"] = "application/json";
+        opts.body = JSON.stringify(data);
+      }
+    }
+
+    if (method === "GET" && !data) {
+      headers["X-Requested-With"] = "XMLHttpRequest";
+    }
+
+    var url = path.startsWith("http") ? path : this.baseUrl + path;
+    var resp = await fetch(url, opts);
+
+    // 累积 Set-Cookie
+    var setCookies = [];
+    try { setCookies = resp.headers.getSetCookie() || []; } catch(e) {
+      var sc = resp.headers.get("Set-Cookie");
+      if (sc) setCookies = [sc];
+    }
+    if (setCookies.length > 0) {
+      var cookieMap = {};
+      if (this.cookieStr) {
+        this.cookieStr.split(";").forEach(function(c) {
+          var parts = c.trim().split("=");
+          if (parts.length >= 2) cookieMap[parts[0].trim()] = parts.slice(1).join("=");
+        });
+      }
+      setCookies.forEach(function(sc) {
+        var nv = sc.split(";")[0].trim().split("=");
+        if (nv.length >= 2) cookieMap[nv[0].trim()] = nv.slice(1).join("=");
+      });
+      this.cookieStr = Object.keys(cookieMap).map(function(k) { return k + "=" + cookieMap[k]; }).join("; ");
+    }
+
+    if (resp.status === 302 || resp.status === 301) {
+      var location = resp.headers.get("Location");
+      if (location) return "";
+    }
+
+    if (resp.status === 401 || resp.status === 403) {
+      this.verified = false;
+      throw { code: 401, message: "cookie_expired" };
+    }
+    if (resp.status === 429) throw { code: 429, message: "rate_limited" };
+    if (!resp.ok && resp.status !== 302) {
+      var errText = await resp.text().catch(function() { return ""; });
+      throw { code: resp.status, message: "HTTP " + resp.status + ": " + errText.slice(0, 500) };
+    }
+
+    var ct = resp.headers.get("Content-Type") || "";
+    var body = await resp.text();
+    if (ct.indexOf("json") !== -1) {
+      try { return JSON.parse(body); } catch(e) { return body; }
+    }
+    return body;
+  }
+
+  async login() {
+    this.cookieStr = "";
+    try { await this.call("GET", "/logon?siteId=" + this.siteId); } catch(e) {}
+
+    var formData = {
+      SiteId: this.siteId,
+      SiteName: "Yusen Terminals LLC",
+      ForTosPortalSite: "True",
+      UserName: this.username,
+      Password: this.password
+    };
+    try {
+      await this.call("POST", "/logon?siteId=" + this.siteId, formData, "form");
+    } catch(e) {
+      if (e.code !== 302 && e.code !== 301) {
+        if (this.cookieStr.indexOf(".ASPXAUTH") === -1) {
+          throw new Error("YTI登录失败: " + (e.message || String(e)));
+        }
+      }
+    }
+
+    if (this.cookieStr.indexOf(".ASPXAUTH") === -1) {
+      throw new Error("YTI登录失败: 未获取到.ASPXAUTH Cookie");
+    }
+
+    try { await this.call("GET", "/account/Account/SelectApplication?siteId=" + this.siteId); } catch(e) {}
+    try { await this.call("GET", "/?_=" + Date.now()); } catch(e) {}
+
+    this.verified = true;
+    return { success: true, cookie: this.cookieStr };
+  }
+
+  async searchImport(containerNo) {
+    var html = await this.call("GET", "/appointment/Appointment/SearchImport?ContainerNumber=" + containerNo + "&_=" + Date.now());
+    if (typeof html !== "string") html = String(html);
+
+    var result = {
+      yardArea: "",
+      viewStateString: "",
+      containerNumber: containerNo,
+      eqSizeType: "",
+      sscoCode: "",
+      available: false,
+      rawHtml: html.slice(0, 5000)
+    };
+
+    var yardMatch = html.match(/yardarea\s*[=:]\s*["']?([^"'\s&]+)/i);
+    if (yardMatch) result.yardArea = yardMatch[1];
+
+    var vsMatch = html.match(/name=["']ContainerAppts\[0\]\.ViewStateString["'][^>]*value=["']([^"']*)["']/i);
+    if (!vsMatch) vsMatch = html.match(/value=["']([^"']*)["'][^>]*name=["']ContainerAppts\[0\]\.ViewStateString["']/i);
+    if (vsMatch) result.viewStateString = vsMatch[1];
+
+    var dataYardMatch = html.match(/data-yardarea=["']([^"']+)["']/i);
+    if (dataYardMatch && !result.yardArea) result.yardArea = dataYardMatch[1];
+
+    var eqMatch = html.match(/name=["']ContainerAppts\[0\]\.EqSizeType["'][^>]*value=["']([^"']*)["']/i);
+    if (eqMatch) result.eqSizeType = eqMatch[1];
+
+    var sscoMatch = html.match(/name=["']ContainerAppts\[0\]\.SscoCode["'][^>]*value=["']([^"']*)["']/i);
+    if (sscoMatch) result.sscoCode = sscoMatch[1];
+
+    if (html.indexOf("Available") !== -1 || html.indexOf("available") !== -1) {
+      result.available = true;
+    }
+
+    if (!result.yardArea) {
+      var slotUrlMatch = html.match(/yardarea=([^&"'\s]+)/i);
+      if (slotUrlMatch) result.yardArea = slotUrlMatch[1];
+    }
+
+    if (!result.viewStateString) {
+      var allMatches = html.match(/value=["']([^"']{50,})["']/g);
+      if (allMatches) {
+        for (var i = 0; i < allMatches.length; i++) {
+          var val = allMatches[i].match(/value=["']([^"']+)["']/);
+          if (val && val[1].length > 100 && val[1].indexOf("/") !== -1) {
+            result.viewStateString = val[1];
+            break;
+          }
+        }
+      }
+    }
+
+    return result;
+  }
+
+  async getSlots(containerNo, date, bookingType) {
+    var moveType = (bookingType === "empty_in") ? "ImportsEmptyIn" : "ImportsFullOut";
+    var importInfo = await this.searchImport(containerNo);
+    var yardArea = importInfo.yardArea || "";
+    if (!yardArea) throw new Error("no_yardarea: 无法获取柜号" + containerNo + "的堆场区域");
+
+    var dateStr = date;
+    if (dateStr.indexOf("/") === -1) {
+      var parts = dateStr.split("-");
+      if (parts.length === 3) dateStr = parts[1] + "/" + parts[2] + "/" + parts[0];
+    }
+
+    var slotUrl = "/appointment/Appointment/GetSlots" +
+      "?moveType=" + moveType +
+      "&yardarea=" + yardArea +
+      "&isOog=False&isReefer=False&isHazardous=False&isWheeled=False" +
+      "&displayAvailableCount=True&_ch=1" +
+      "&NewApptDate=" + encodeURIComponent(dateStr) +
+      "&_=" + Date.now();
+
+    var html = await this.call("GET", slotUrl);
+    if (typeof html !== "string") html = String(html);
+
+    var slotMap = {};
+    var slotPattern = /(\d+)~(\d{2,4})~(\d+)~([^~]+)~([^~]+)~(\d+)/g;
+    var match;
+    while ((match = slotPattern.exec(html)) !== null) {
+      var slotId = match[1];
+      var slotTime = match[2];
+      var capacity = match[6];
+      var hour = slotTime.substring(0, slotTime.length - 2);
+      var minute = slotTime.substring(slotTime.length - 2);
+      var timeKey = hour.padStart(2, "0") + ":" + minute;
+      slotMap[timeKey] = { slot: timeKey + " (" + capacity + ")", id: slotId, gate: yardArea, yardArea: yardArea };
+    }
+
+    if (Object.keys(slotMap).length === 0) {
+      var optionPattern = /<option[^>]*value=["']([^"']+)["'][^>]*>([^<]+)</g;
+      while ((match = optionPattern.exec(html)) !== null) {
+        var val = match[1];
+        var label = match[2].trim();
+        var tm = label.match(/(\d{1,2}):(\d{2})/);
+        if (tm && val) {
+          slotMap[tm[1].padStart(2,"0") + ":" + tm[2]] = { slot: label, id: val, gate: yardArea, yardArea: yardArea };
+        }
+      }
+    }
+
+    return { slots: slotMap, importInfo: importInfo, rawHtml: html.slice(0, 3000) };
+  }
+
+  async createBooking(container, date, time, options) {
+    options = options || {};
+    var moveType = options.bookingType === "empty_in" ? "ImportsEmptyIn" : "ImportsFullOut";
+
+    var importInfo = options.importInfo || await this.searchImport(container);
+    var yardArea = importInfo.yardArea || "";
+    var viewStateString = importInfo.viewStateString || "";
+    if (!yardArea) throw new Error("no_yardarea");
+    if (!viewStateString) throw new Error("no_viewstate");
+
+    var dateStr = date;
+    if (dateStr.indexOf("/") === -1) {
+      var parts = dateStr.split("-");
+      if (parts.length === 3) dateStr = parts[1] + "/" + parts[2] + "/" + parts[0];
+    }
+
+    var slotMap = options.slotMap;
+    if (!slotMap) {
+      var slotResult = await this.getSlots(container, dateStr, options.bookingType);
+      slotMap = slotResult.slots;
+    }
+
+    var matchedSlot = null;
+    if (slotMap[time]) {
+      matchedSlot = slotMap[time];
+    } else {
+      var hour = time.split(":")[0];
+      var keys = Object.keys(slotMap).sort();
+      for (var ki = 0; ki < keys.length; ki++) {
+        if (keys[ki].startsWith(hour + ":")) { matchedSlot = slotMap[keys[ki]]; break; }
+      }
+    }
+    if (!matchedSlot) throw new Error("no_slot_for_" + time);
+
+    var existing = options.existingAppt || null;
+    var hasExisting = existing && (existing.apptNo || existing.gateApptId);
+
+    var saveData = {
+      "ContainerAppts[0].ContainerNumber": container,
+      "ContainerAppts[0].EqSizeType": importInfo.eqSizeType || "45G1",
+      "ContainerAppts[0].SscoCode": importInfo.sscoCode || "",
+      "ContainerAppts[0].YardArea": yardArea,
+      "ContainerAppts[0].MoveType": moveType,
+      "ContainerAppts[0].SlotId": matchedSlot.id,
+      "ContainerAppts[0].SlotDate": dateStr,
+      "ContainerAppts[0].SlotTime": time,
+      "ContainerAppts[0].ViewStateString": viewStateString,
+      "ContainerAppts[0].TruckerCode": this.truckerCode,
+      "ContainerAppts[0].SendNotification": "true",
+      "ContainerAppts[0].ApptId": hasExisting ? (existing.gateApptId || existing.apptNo || "0") : "0"
+    };
+
+    var resp = await this.call("POST", "/appointment/Appointment/SaveImport", saveData, "form");
+
+    if (typeof resp === "string") {
+      if (resp.indexOf("Data has been saved") !== -1 || resp.indexOf("success") !== -1) {
+        var apptNoMatch = resp.match(/AppointmentNumber[=:]["']?\s*(\w+)/i) || resp.match(/apptId[=:]?\s*(\d+)/i);
+        return { success: true, confirmed: true, apptNo: apptNoMatch ? apptNoMatch[1] : "YTI_" + Date.now(), time: dateStr + " " + time, date: dateStr };
+      }
+      var errMatch = resp.match(/class=["']?error[^>]*>([^<]+)/i);
+      if (errMatch) throw new Error("booking_not_confirmed: " + errMatch[1].trim());
+      throw new Error("booking_not_confirmed: " + resp.slice(0, 300));
+    }
+
+    if (resp && typeof resp === "object") {
+      if (resp.success || resp.Status === "success") {
+        return { success: true, confirmed: true, apptNo: resp.AppointmentNumber || resp.apptId || "YTI_" + Date.now(), time: dateStr + " " + time, date: dateStr };
+      }
+      throw new Error("booking_not_confirmed: " + (resp.message || resp.Message || JSON.stringify(resp).slice(0, 300)));
+    }
+
+    throw new Error("booking_not_confirmed: unknown response");
+  }
+
+  async getBooking(containerNo) {
+    try {
+      var html = await this.call("GET", "/Report/ImportContainer/Inquiry?MainMenu=Report&ContainerNumber=" + containerNo + "&_=" + Date.now());
+      if (typeof html !== "string") return null;
+      if (html.indexOf("No appointment") !== -1 || html.indexOf("No data") !== -1) return null;
+
+      var apptNoMatch = html.match(/AppointmentNumber[=:]["']?\s*(\w+)/i) || html.match(/apptId[=:]?\s*(\d+)/i);
+      var timeMatch = html.match(/(\d{1,2}\/\d{1,2}\/\d{4})[\s\S]*?(\d{1,2}:\d{2})/i);
+
+      if (apptNoMatch) {
+        return {
+          apptNo: apptNoMatch[1],
+          gateApptId: apptNoMatch[1],
+          appointmentTime: timeMatch ? (timeMatch[1] + " " + timeMatch[2]) : "",
+          truckVisitApptId: 0,
+          gateApptConId: 0,
+          billOfLading: ""
+        };
+      }
+      return null;
+    } catch (e) {
+      if (e.code === 401) throw e;
+      return null;
+    }
+  }
+}
+
+async function getValidYtiClient(username, password, force) {
+  var cacheKey = username;
+  if (!force) {
+    var cached = ytiCookieCache.get(cacheKey);
+    if (cached && cached.expiresAt > Date.now()) {
+      var c = new YTIConnectorClient({ username: username, password: password, cookie: cached.cookie });
+      c.verified = true;
+      return c;
+    }
+  }
+
+  var client = new YTIConnectorClient({ username: username, password: password });
+  await client.login();
+  ytiCookieCache.set(cacheKey, { cookie: client.cookieStr, createdAt: Date.now(), expiresAt: Date.now() + YTI_COOKIE_TTL });
+  return client;
+}
+
+// Y1: 登录
+app.post('/yti/login', async function(req, res) {
+  var username = req.body && req.body.username;
+  var password = req.body && req.body.password;
+  var force = req.body && req.body.force;
+  if (!username || !password) return res.status(400).json({ success: false, error: 'username and password required' });
+  try {
+    var client = await getValidYtiClient(username, password, !!force);
+    res.json({ success: true, cookie: client.cookieStr, cached: !force });
+  } catch (e) {
+    res.status(401).json({ success: false, error: e.message || String(e) });
+  }
+});
+
+// Y2: 搜索柜号
+app.post('/yti/search', async function(req, res) {
+  var username = req.body && req.body.username;
+  var password = req.body && req.body.password;
+  var container = req.body && req.body.container;
+  if (!username || !password) return res.status(400).json({ error: 'username and password required' });
+  if (!container) return res.status(400).json({ error: 'container required' });
+  try {
+    var client = await getValidYtiClient(username, password, false);
+    var result;
+    try {
+      result = await client.searchImport(container);
+    } catch (e) {
+      if (e && (e.code === 401 || (e.message && e.message.indexOf("cookie_expired") !== -1))) {
+        client = await getValidYtiClient(username, password, true);
+        result = await client.searchImport(container);
+      } else throw e;
+    }
+    res.json({ success: true, result: result });
+  } catch (e) {
+    var code = (e && e.code) || 500;
+    res.status(code).json({ error: e.message || String(e) });
+  }
+});
+
+// Y3: 查询时段
+app.post('/yti/slots', async function(req, res) {
+  var username = req.body && req.body.username;
+  var password = req.body && req.body.password;
+  var container = req.body && req.body.container;
+  var date = req.body && req.body.date;
+  var bookingType = (req.body && req.body.bookingType) || "load_out";
+  if (!username || !password) return res.status(400).json({ error: 'username and password required' });
+  if (!container || !date) return res.status(400).json({ error: 'container and date required' });
+  try {
+    var client = await getValidYtiClient(username, password, false);
+    var result;
+    try {
+      result = await client.getSlots(container, date, bookingType);
+    } catch (e) {
+      if (e && (e.code === 401 || (e.message && e.message.indexOf("cookie_expired") !== -1))) {
+        client = await getValidYtiClient(username, password, true);
+        result = await client.getSlots(container, date, bookingType);
+      } else throw e;
+    }
+    res.json({ success: true, slots: result.slots, importInfo: result.importInfo });
+  } catch (e) {
+    var code2 = (e && e.code) || 500;
+    res.status(code2).json({ error: e.message || String(e) });
+  }
+});
+
+// Y4: 创建/修改预约
+app.post('/yti/book', async function(req, res) {
+  var username = req.body && req.body.username;
+  var password = req.body && req.body.password;
+  var container = req.body && req.body.container;
+  var date = req.body && req.body.date;
+  var time = req.body && req.body.time;
+  var bookingType = (req.body && req.body.bookingType) || "load_out";
+  var slotMap = req.body && req.body.slotMap;
+  var importInfo = req.body && req.body.importInfo;
+  var existingAppt = req.body && req.body.existingAppt;
+  if (!username || !password) return res.status(400).json({ error: 'username and password required' });
+  if (!container || !date || !time) return res.status(400).json({ error: 'container, date and time required' });
+  try {
+    var client = await getValidYtiClient(username, password, false);
+    var result;
+    try {
+      result = await client.createBooking(container, date, time, { bookingType: bookingType, slotMap: slotMap, importInfo: importInfo, existingAppt: existingAppt });
+    } catch (e) {
+      if (e && (e.code === 401 || (e.message && e.message.indexOf("cookie_expired") !== -1))) {
+        client = await getValidYtiClient(username, password, true);
+        result = await client.createBooking(container, date, time, { bookingType: bookingType, slotMap: slotMap, importInfo: importInfo, existingAppt: existingAppt });
+      } else throw e;
+    }
+    res.json({ success: true, result: result });
+  } catch (e) {
+    var code3 = (e && e.code) || 500;
+    res.status(code3).json({ error: e.message || String(e) });
+  }
+});
+
+// Y5: 查询已有预约
+app.post('/yti/appointments', async function(req, res) {
+  var username = req.body && req.body.username;
+  var password = req.body && req.body.password;
+  var container = req.body && req.body.container;
+  if (!username || !password) return res.status(400).json({ error: 'username and password required' });
+  if (!container) return res.status(400).json({ error: 'container required' });
+  try {
+    var client = await getValidYtiClient(username, password, false);
+    var result;
+    try {
+      result = await client.getBooking(container);
+    } catch (e) {
+      if (e && (e.code === 401 || (e.message && e.message.indexOf("cookie_expired") !== -1))) {
+        client = await getValidYtiClient(username, password, true);
+        result = await client.getBooking(container);
+      } else throw e;
+    }
+    res.json({ success: true, appointment: result });
+  } catch (e) {
+    var code4 = (e && e.code) || 500;
+    res.status(code4).json({ error: e.message || String(e) });
+  }
+});
+
+// ============================================
 // 远程更新端点：通过 HTTPS 触发 git pull + pm2 restart
 // 避免每次更新都需要 SSH 登录 VPS
 // ============================================
