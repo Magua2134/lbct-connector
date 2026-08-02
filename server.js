@@ -4036,12 +4036,13 @@ class YTIConnectorClient {
       var vsObj = JSON.parse(decoded);
       console.log("[YTI] ViewStateString parsed OK, keys=" + Object.keys(vsObj).join(",").slice(0, 200));
       console.log("[YTI] VS before update: AvailableSlotCount=" + vsObj.AvailableSlotCount + ", TimeSlotKey=" + vsObj.TimeSlotKey + ", MoveType=" + vsObj.MoveType);
-      // 更新槽位状态字段为选中槽位的实际值
-      vsObj.AvailableSlotCount = String(matchedSlot.availableCount || matchedSlot.capacity || "0");
-      vsObj.TimeSlotKey = matchedSlot.fullKey || matchedSlot.id;
-      // ★ 更新 MoveType 为实际操作类型（ImportsFullOut=提重柜, ImportsEmptyIn=还空柜）
+      // ★ 只更新 MoveType，不改 TimeSlotKey 和 AvailableSlotCount
+      // 因为服务端会对比 view-state 中的 TimeSlotKey 和 NewTimeSlotKey 字段
+      // 如果两者相同，则认为"无变化"并拒绝保存
+      // 正确做法：view-state 保持原始值(0~0~0~...)，NewTimeSlotKey 设为新选的时段
+      // 服务端检测到 NewTimeSlotKey != TimeSlotKey 即认可户选择了新时段
       vsObj.MoveType = moveType;
-      console.log("[YTI] VS after update: AvailableSlotCount=" + vsObj.AvailableSlotCount + ", TimeSlotKey=" + vsObj.TimeSlotKey + ", MoveType=" + vsObj.MoveType);
+      console.log("[YTI] VS after update (only MoveType): MoveType=" + vsObj.MoveType);
       updatedViewState = JSON.stringify(vsObj);
       vsParseOk = true;
     } catch(e) {
