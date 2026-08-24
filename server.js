@@ -4350,21 +4350,58 @@ class YTIConnectorClient {
       if (typeof html !== "string") return null;
       if (html.indexOf("No appointment") !== -1 || html.indexOf("No data") !== -1) return null;
 
+      console.log("[YTI] getBooking: html length=" + html.length + ", contains EditPreAdvise=" + (html.indexOf("EditPreAdvise") !== -1) + ", contains groupId=" + (html.indexOf("groupId") !== -1));
+
       var apptNoMatch = html.match(/apptId[=:]?\s*(\d+)/i) || html.match(/AppointmentNumber[=:]["']?\s*(\w+)/i);
       var timeMatch = html.match(/(\d{1,2}\/\d{1,2}\/\d{4})[\s\S]*?(\d{1,2}:\d{2})/i);
 
-      // ★ 提取 groupId（改约必需）：从 EditPreAdvise 链接中解析
-      var groupIdMatch = html.match(/groupId[=:]?\s*(\d+)/i);
-      var groupId = groupIdMatch ? groupIdMatch[1] : "";
+      // ★ 提取 groupId（改约必需）：处理 & 和 &amp; 两种编码
+      var groupId = "";
 
-      // ★ 从 EditPreAdvise URL 中同时提取 apptId 和 groupId
+      // 方法1: 直接匹配 groupId=
+      var groupIdMatch = html.match(/groupId[=:]?\s*(\d+)/i);
+      if (groupIdMatch) groupId = groupIdMatch[1];
+
+      // 方法2: 从 EditPreAdvise URL 中提取 (处理 & 和 &amp;)
       if (!groupId) {
-        var editUrlMatch = html.match(/EditPreAdvise\?groupId=(\d+)&apptId=(\d+)/i);
+        var editUrlMatch = html.match(/EditPreAdvise\?groupId=(\d+)&amp;apptId=(\d+)/i) ||
+                           html.match(/EditPreAdvise\?groupId=(\d+)&apptId=(\d+)/i);
         if (editUrlMatch) {
           groupId = editUrlMatch[1];
           if (!apptNoMatch) apptNoMatch = [null, editUrlMatch[2]];
+          console.log("[YTI] getBooking: found EditPreAdvise URL, groupId=" + groupId + ", apptId=" + editUrlMatch[2]);
         }
       }
+
+      // 方法3: 从 data-popup-url 属性中提取
+      if (!groupId) {
+        var popupUrlMatch = html.match(/data-popup-url=["'][^"']*EditPreAdvise\?groupId=(\d+)&[^"']*/i) ||
+                            html.match(/data-popup-url=["'][^"']*EditPreAdvise\?groupId=(\d+)&amp;[^"']*/i);
+        if (popupUrlMatch) {
+          groupId = popupUrlMatch[1];
+          console.log("[YTI] getBooking: found groupId from data-popup-url: " + groupId);
+        }
+      }
+
+      // 方法4: 从 href 属性中提取
+      if (!groupId) {
+        var hrefMatch = html.match(/href=["'][^"']*EditPreAdvise\?groupId=(\d+)&[^"']*/i) ||
+                        html.match(/href=["'][^"']*EditPreAdvise\?groupId=(\d+)&amp;[^"']*/i);
+        if (hrefMatch) {
+          groupId = hrefMatch[1];
+          console.log("[YTI] getBooking: found groupId from href: " + groupId);
+        }
+      }
+
+      // 方法5: 如果还是找不到groupId，尝试从EditPreAdvise附近的任何数字提取
+      if (!groupId && html.indexOf("EditPreAdvise") !== -1) {
+        var editArea = html.substring(html.indexOf("EditPreAdvise"), html.indexOf("EditPreAdvise") + 200);
+        console.log("[YTI] getBooking: EditPreAdvise area: " + editArea.slice(0, 200));
+        var anyGroupId = editArea.match(/groupId=(\d+)/i) || editArea.match(/groupId=(\d+)/i);
+        if (anyGroupId) groupId = anyGroupId[1];
+      }
+
+      console.log("[YTI] getBooking: container=" + containerNo + ", apptId=" + (apptNoMatch ? apptNoMatch[1] : "N/A") + ", groupId=" + groupId);
 
       // ★ 提取 transactionType（DI/RM）
       var txTypeMatch = html.match(/TransactionType[=:]["']?\s*(\w+)/i) || html.match(/transactionType[=:]["']?\s*(\w+)/i);
@@ -4653,6 +4690,8 @@ app.post('/yti/book', async function(req, res) {
   var existingAppt = req.body && req.body.existingAppt;
   if (!username || !password) return res.status(400).json({ error: 'username and password required' });
   if (!container || !date || !time) return res.status(400).json({ error: 'container, date and time required' });
+
+  console.log("[YTI /yti/book] container=" + container + ", date=" + date + ", time=" + time + ", bookingType=" + bookingType + ", existingAppt=" + JSON.stringify(existingAppt ? { apptNo: existingAppt.apptNo, gateApptId: existingAppt.gateApptId, groupId: existingAppt.groupId } : null));
   try {
     var client = await getValidYtiClient(username, password, false);
     var result;
