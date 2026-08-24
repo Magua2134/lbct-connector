@@ -4020,6 +4020,145 @@ class YTIConnectorClient {
     options = options || {};
     var moveType = options.bookingType === "empty_in" ? "ImportsEmptyIn" : "ImportsFullOut";
 
+    var existing = options.existingAppt || null;
+    var hasExisting = existing && (existing.apptNo || existing.gateApptId);
+    var hasGroupId = existing && existing.groupId;
+
+    // ★ 改约模式：有 groupId 时走 EditPreAdvise 流程（复刻油猴脚本）
+    if (hasExisting && hasGroupId) {
+      console.log("[YTI] createBooking: RESCHEDULE mode, apptId=" + existing.gateApptId + ", groupId=" + existing.groupId);
+      var editInfo = await this.loadEditPreAdvise(existing.gateApptId || existing.apptNo, existing.groupId);
+
+      var dateStr = date;
+      if (dateStr.indexOf("/") === -1) {
+        var dateParts = dateStr.split("-");
+        if (dateParts.length === 3) dateStr = dateParts[1] + "/" + dateParts[2] + "/" + dateParts[0];
+      }
+
+      // 用 EditPreAdvise 页面的参数查询改约时段
+      var rescheduleSlotMap = options.slotMap;
+      if (!rescheduleSlotMap) {
+        rescheduleSlotMap = await this.getSlotsForReschedule(existing.gateApptId || existing.apptNo, editInfo, dateStr);
+      }
+
+      var matchedSlot = null;
+      if (rescheduleSlotMap[time]) {
+        matchedSlot = rescheduleSlotMap[time];
+      } else {
+        var rsHour = time.split(":")[0];
+        var rsKeys = Object.keys(rescheduleSlotMap).sort();
+        for (var rski = 0; rski < rsKeys.length; rski++) {
+          if (rsKeys[rski].startsWith(rsHour + ":")) { matchedSlot = rescheduleSlotMap[rsKeys[rski]]; break; }
+        }
+      }
+      if (!matchedSlot) throw new Error("no_slot_for_" + time + " (reschedule)");
+
+      // 更新 ViewStateString 中的 MoveType
+      var rsViewState = editInfo.viewStateString;
+      try {
+        var rsDecoded = rsViewState
+          .replace(/&quot;/g, '"').replace(/&amp;/g, '&')
+          .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&#39;/g, "'");
+        var rsVsObj = JSON.parse(rsDecoded);
+        rsVsObj.MoveType = moveType;
+        rsViewState = JSON.stringify(rsVsObj);
+      } catch(e) {
+        console.log("[YTI] reschedule ViewState parse failed:", e.message);
+      }
+
+      var rsFullSlotKey = matchedSlot.fullKey || matchedSlot.id;
+      var rsFormData = {
+        "view-state": rsViewState,
+        "__RequestVerificationToken": editInfo.antiForgeryToken || this.antiForgeryToken || "",
+        "IsEGApptRequiredForFullOut": "False",
+        "SendNotification": "true",
+        "ProceedWithDuplicates": "False",
+        "chkMarkDeleteAll": "false",
+        "Inquiry.ViewMode": "",
+        "Inquiry.MoveType": "",
+        "Inquiry.ContainerNumber": container,
+        "Inquiry.ContainerNumbers": container,
+        "Inquiry.InquiryType": "Container",
+        "Inquiry.BlNumber": "",
+        "Inquiry.BlNumbers": "",
+        "Inquiry.CurrentBolNumber": "",
+        "Inquiry.VesselKey": "",
+        "ContainerAppts[0].ApptInfo.NewTimeSlotKey": rsFullSlotKey,
+        "ContainerAppts[0].ApptInfo.NewApptDate": dateStr,
+        "ContainerAppts[0].ApptInfo.TruckerCode": editInfo.truckerCode || this.truckerCode,
+        "ContainerAppts[0].ApptInfo.ReqSequence": "1",
+        "ContainerAppts[0].ApptInfo.GroupId": existing.groupId,
+        "ContainerAppts[0].ApptInfo.SubMoveId": "",
+        "ContainerAppts[0].ApptInfo.MainMoveId": "",
+        "ContainerAppts[0].ApptInfo.HasDualAppt": "False",
+        "ContainerAppts[0].ApptInfo.IsOutOfGauge": "False",
+        "ContainerAppts[0].ApptInfo.IsHazardous": "False",
+        "ContainerAppts[0].ApptInfo.IsReefer": "False",
+        "ContainerAppts[0].ApptInfo.IsWheeled": "False",
+        "ContainerAppts[0].ApptInfo.IsMarkedForDelete": "false",
+        "ContainerAppts[0].NeedsAgreeOnDuplication": "False",
+        "ContainerAppts[0].ApptId": existing.gateApptId || existing.apptNo || "0",
+        "ContainerAppts[0].EqSizeType": editInfo.eqSizeType || "45G1",
+        "ContainerAppts[0].SscoCode": editInfo.sscoCode || "",
+        "ContainerAppts[0].ContainerNumber": container,
+        "ContainerAppts[0].DualEmptyInApptInfo.ApptInfo.NewApptDate": dateStr,
+        "ContainerAppts[0].DualEmptyInApptInfo.ApptInfo.NewTimeSlotKey": "",
+        "ContainerAppts[0].DualEmptyInApptInfo.ApptInfo.OldContainerNumber": "",
+        "ContainerAppts[0].DualEmptyInApptInfo.ApptInfo.OldSscoCode": "",
+        "ContainerAppts[0].DualEmptyInApptInfo.ApptInfo.TruckerCode": editInfo.truckerCode || this.truckerCode,
+        "hidden-cntr-len": "",
+        "hidden-cntr-type": "",
+        "hidden-cntr-ht": "",
+        "hidden-dual-ssco": ""
+      };
+
+      // 确定改约提交端点：优先使用表单 action，否则用 LimitedPreAdvise/SaveImport
+      var rescheduleEndpoints = [
+        editInfo.formAction || "/appointment/LimitedPreAdvise/SaveImport",
+        "/appointment/LimitedPreAdvise/SaveImport",
+        "/appointment/Appointment/SaveImport"
+      ];
+
+      console.log("[YTI] reschedule submit: slotKey=" + rsFullSlotKey + ", apptId=" + (existing.gateApptId || existing.apptNo) + ", groupId=" + existing.groupId);
+
+      var rsResp;
+      var rsLastErr;
+      for (var rep = 0; rep < rescheduleEndpoints.length; rep++) {
+        try {
+          rsResp = await this.call("POST", rescheduleEndpoints[rep], rsFormData, "form");
+          console.log("[YTI] reschedule endpoint " + rep + " (" + rescheduleEndpoints[rep] + ") response type:", typeof rsResp);
+          if (typeof rsResp === "string") {
+            if (rsResp.indexOf("Data has been saved") !== -1 || rsResp.indexOf("success") !== -1) {
+              var rsApptNoMatch = rsResp.match(/AppointmentNumber[=:]["']?\s*(\w+)/i) || rsResp.match(/apptId[=:]?\s*(\d+)/i);
+              return { success: true, confirmed: true, apptNo: rsApptNoMatch ? rsApptNoMatch[1] : existing.gateApptId || existing.apptNo, time: dateStr + " " + time, date: dateStr };
+            }
+            // 检查是否包含错误
+            var rsErrMatch = rsResp.match(/class=["']?error[^>]*>([^<]+)/i);
+            if (rsErrMatch) {
+              rsLastErr = new Error("reschedule_failed: " + rsErrMatch[1].trim());
+              continue;
+            }
+            // 空200响应也算成功（油猴脚本就是这样判断的）
+            if (rsResp.length < 100) {
+              return { success: true, confirmed: true, apptNo: existing.gateApptId || existing.apptNo, time: dateStr + " " + time, date: dateStr };
+            }
+          }
+          if (rsResp && typeof rsResp === "object") {
+            if (rsResp.success || rsResp.Status === "success") {
+              return { success: true, confirmed: true, apptNo: rsResp.AppointmentNumber || rsResp.apptId || existing.gateApptId, time: dateStr + " " + time, date: dateStr };
+            }
+            rsLastErr = new Error("reschedule_not_confirmed: " + (rsResp.message || rsResp.Message || JSON.stringify(rsResp).slice(0, 300)));
+            continue;
+          }
+        } catch(callErr) {
+          console.log("[YTI] reschedule endpoint " + rep + " failed: " + (callErr.message || String(callErr)).slice(0, 200));
+          rsLastErr = callErr;
+        }
+      }
+      throw rsLastErr || new Error("reschedule_failed: all endpoints failed");
+    }
+
+    // ===== 新建预约流程（原有逻辑） =====
     var importInfo = options.importInfo || await this.searchImport(container);
     var yardArea = importInfo.yardArea || "";
     var viewStateString = importInfo.viewStateString || "";
@@ -4049,9 +4188,6 @@ class YTIConnectorClient {
       }
     }
     if (!matchedSlot) throw new Error("no_slot_for_" + time);
-
-    var existing = options.existingAppt || null;
-    var hasExisting = existing && (existing.apptNo || existing.gateApptId);
 
     // ★ 关键修复：解析并更新 ViewStateString 中的 AvailableSlotCount 和 TimeSlotKey
     // ViewStateString 是一个 JSON 字符串（可能 HTML 编码），包含槽位状态信息
@@ -4214,13 +4350,37 @@ class YTIConnectorClient {
       if (typeof html !== "string") return null;
       if (html.indexOf("No appointment") !== -1 || html.indexOf("No data") !== -1) return null;
 
-      var apptNoMatch = html.match(/AppointmentNumber[=:]["']?\s*(\w+)/i) || html.match(/apptId[=:]?\s*(\d+)/i);
+      var apptNoMatch = html.match(/apptId[=:]?\s*(\d+)/i) || html.match(/AppointmentNumber[=:]["']?\s*(\w+)/i);
       var timeMatch = html.match(/(\d{1,2}\/\d{1,2}\/\d{4})[\s\S]*?(\d{1,2}:\d{2})/i);
+
+      // ★ 提取 groupId（改约必需）：从 EditPreAdvise 链接中解析
+      var groupIdMatch = html.match(/groupId[=:]?\s*(\d+)/i);
+      var groupId = groupIdMatch ? groupIdMatch[1] : "";
+
+      // ★ 从 EditPreAdvise URL 中同时提取 apptId 和 groupId
+      if (!groupId) {
+        var editUrlMatch = html.match(/EditPreAdvise\?groupId=(\d+)&apptId=(\d+)/i);
+        if (editUrlMatch) {
+          groupId = editUrlMatch[1];
+          if (!apptNoMatch) apptNoMatch = [null, editUrlMatch[2]];
+        }
+      }
+
+      // ★ 提取 transactionType（DI/RM）
+      var txTypeMatch = html.match(/TransactionType[=:]["']?\s*(\w+)/i) || html.match(/transactionType[=:]["']?\s*(\w+)/i);
+      var txType = txTypeMatch ? txTypeMatch[1].toUpperCase() : "";
+
+      // ★ 提取预约状态
+      var statusMatch = html.match(/Status[=:]["']?\s*(\w+)/i);
+      var status = statusMatch ? statusMatch[1] : "";
 
       if (apptNoMatch) {
         return {
           apptNo: apptNoMatch[1],
           gateApptId: apptNoMatch[1],
+          groupId: groupId,
+          transactionType: txType,
+          status: status,
           appointmentTime: timeMatch ? (timeMatch[1] + " " + timeMatch[2]) : "",
           truckVisitApptId: 0,
           gateApptConId: 0,
@@ -4232,6 +4392,145 @@ class YTIConnectorClient {
       if (e.code === 401) throw e;
       return null;
     }
+  }
+
+  // ★ 新增：加载 EditPreAdvise 页面获取改约参数（复刻油猴脚本流程）
+  async loadEditPreAdvise(apptId, groupId) {
+    var url = "/appointment/LimitedPreAdvise/EditPreAdvise?groupId=" + groupId + "&apptId=" + apptId + "&_=" + Date.now();
+    var html = await this.call("GET", url);
+    if (typeof html !== "string") html = String(html);
+
+    var result = {
+      viewStateString: "",
+      yardArea: "",
+      sscoCode: "",
+      eqSizeType: "",
+      antiForgeryToken: "",
+      slotQueryUrl: "",
+      formAction: "",
+      truckerCode: this.truckerCode || "MGQD"
+    };
+
+    // 提取 ViewStateString
+    var vsMatch = html.match(/name=["']ContainerAppts\[0\]\.ViewStateString["'][^>]*value=(["'])([\s\S]*?)\1/i);
+    if (!vsMatch) vsMatch = html.match(/value=(["'])([\s\S]*?)\1[^>]*name=["']ContainerAppts\[0\]\.ViewStateString["']/i);
+    if (vsMatch) result.viewStateString = vsMatch[2];
+    console.log("[YTI] loadEditPreAdvise: viewStateLen=" + (result.viewStateString || "").length);
+
+    // 提取 YardArea
+    var yardMatch = html.match(/yardarea\s*[=:]\s*["']?([^"'\s&]+)/i) ||
+                    html.match(/data-yardarea=["']([^"']+)["']/i);
+    if (yardMatch) result.yardArea = yardMatch[1];
+    // 从 slot query URL 中提取 yardarea
+    if (!result.yardArea) {
+      var slotUrlMatch = html.match(/yardarea=([^&"'\s]+)/i);
+      if (slotUrlMatch) result.yardArea = slotUrlMatch[1];
+    }
+    console.log("[YTI] loadEditPreAdvise: yardArea=" + result.yardArea);
+
+    // 提取 SscoCode
+    var sscoMatch = html.match(/name=["']ContainerAppts\[0\]\.SscoCode["'][^>]*value=["']([^"']*)["']/i);
+    if (sscoMatch) result.sscoCode = sscoMatch[1];
+    console.log("[YTI] loadEditPreAdvise: sscoCode=" + result.sscoCode);
+
+    // 提取 EqSizeType
+    var eqMatch = html.match(/name=["']ContainerAppts\[0\]\.EqSizeType["'][^>]*value=["']([^"']*)["']/i);
+    if (eqMatch) result.eqSizeType = eqMatch[1];
+
+    // 提取 AntiForgeryToken
+    var afMatch = html.match(/name=["']__RequestVerificationToken["'][^>]*value=["']([^"']+)["']/i);
+    if (afMatch) result.antiForgeryToken = afMatch[1];
+
+    // 提取 TruckerCode
+    var tcMatch = html.match(/name=["']ContainerAppts\[0\]\.ApptInfo\.TruckerCode["'][^>]*value=["']([^"']*)["']/i) ||
+                  html.match(/name=["']ContainerAppts\[0\]\.TruckerCode["'][^>]*value=["']([^"']*)["']/i);
+    if (tcMatch && tcMatch[1]) result.truckerCode = tcMatch[1];
+
+    // 提取 slot 查询 URL（data-update-url 属性）
+    var slotUrlFullMatch = html.match(/data-update-url=["']([^"']+)["']/i);
+    if (slotUrlFullMatch) {
+      result.slotQueryUrl = slotUrlFullMatch[1]
+        .replace(/&amp;/g, '&')
+        .replace(/&#39;/g, "'");
+      console.log("[YTI] loadEditPreAdvise: slotQueryUrl=" + result.slotQueryUrl.slice(0, 200));
+    }
+
+    // 提取表单 action URL
+    var formActionMatch = html.match(/<form[^>]*action=["']([^"']+)["']/i);
+    if (formActionMatch) result.formAction = formActionMatch[1].replace(/&amp;/g, '&');
+
+    // 提取 moveType
+    var moveTypeMatch = html.match(/moveType=([^&"'\s]+)/i);
+    result.moveType = moveTypeMatch ? moveTypeMatch[1] : "ImportsFullOut";
+
+    return result;
+  }
+
+  // ★ 新增：通过 EditPreAdvise 查询改约时段（复刻油猴脚本）
+  async getSlotsForReschedule(apptId, editInfo, dateStr) {
+    // 使用从 EditPreAdvise 页面提取的 slot query URL
+    var slotUrl = editInfo.slotQueryUrl;
+    if (!slotUrl) {
+      // 兜底：手动构造 URL
+      slotUrl = "/appointment/LimitedPreAdvise/GetAppointmentSlots" +
+        "?moveType=" + (editInfo.moveType || "ImportsFullOut") +
+        "&yardarea=" + (editInfo.yardArea || "") +
+        "&displayAvailableCount=True" +
+        "&isOog=False&isReefer=False&isHazardous=False&isLateGate=False&isWheeled=False" +
+        "&SscoCode=" + (editInfo.sscoCode || "") +
+        "&eqSizeType=" + (editInfo.eqSizeType || "45G1");
+    }
+    // 添加 apptId 和 NewApptDate 参数（改约必需）
+    if (slotUrl.indexOf("apptId=") === -1) slotUrl += "&apptId=" + apptId;
+    if (slotUrl.indexOf("NewApptDate=") === -1) slotUrl += "&NewApptDate=" + encodeURIComponent(dateStr);
+    slotUrl += "&_ch=1&_=" + Date.now();
+
+    console.log("[YTI] getSlotsForReschedule: " + slotUrl.slice(0, 200));
+    var html = await this.call("GET", slotUrl);
+    if (typeof html !== "string") html = String(html);
+
+    var slotMap = {};
+    // YTI slot 格式: slotId~time~capacity~startDate~endDate~availableCount
+    var slotPattern = /(\d+)~(\d{2,4})~(\d+)~([^~]+)~([^~]+)~(\d+)/g;
+    var match;
+    while ((match = slotPattern.exec(html)) !== null) {
+      var fullKey = match[0];
+      var slotId = match[1];
+      var slotTime = match[2];
+      var capacity = match[6];
+      var hour = slotTime.substring(0, slotTime.length - 2);
+      var minute = slotTime.substring(slotTime.length - 2);
+      var timeKey = hour.padStart(2, "0") + ":" + minute;
+      slotMap[timeKey] = {
+        slot: timeKey + " (" + capacity + ")",
+        id: slotId,
+        fullKey: fullKey,
+        availableCount: capacity,
+        gate: editInfo.yardArea,
+        yardArea: editInfo.yardArea
+      };
+    }
+
+    // 兜底：从 <option> 解析
+    if (Object.keys(slotMap).length === 0) {
+      var optionPattern = /<option[^>]*value=["']([^"']+)["'][^>]*>([^<]+)</g;
+      while ((match = optionPattern.exec(html)) !== null) {
+        var val = match[1];
+        var label = match[2].trim();
+        var tm = label.match(/(\d{1,2}):(\d{2})/);
+        if (tm && val && val.indexOf("~") !== -1) {
+          var optParts = val.split("~");
+          var optAvail = optParts.length >= 6 ? optParts[5] : "0";
+          slotMap[tm[1].padStart(2,"0") + ":" + tm[2]] = {
+            slot: label, id: val, fullKey: val, availableCount: optAvail,
+            gate: editInfo.yardArea, yardArea: editInfo.yardArea
+          };
+        }
+      }
+    }
+
+    console.log("[YTI] getSlotsForReschedule: found " + Object.keys(slotMap).length + " slots");
+    return slotMap;
   }
 }
 
@@ -4298,11 +4597,34 @@ app.post('/yti/slots', async function(req, res) {
   var container = req.body && req.body.container;
   var date = req.body && req.body.date;
   var bookingType = (req.body && req.body.bookingType) || "load_out";
+  var gateApptId = req.body && req.body.gateApptId;
   if (!username || !password) return res.status(400).json({ error: 'username and password required' });
   if (!container || !date) return res.status(400).json({ error: 'container and date required' });
   try {
     var client = await getValidYtiClient(username, password, false);
     var result;
+
+    // ★ 改约模式：有 gateApptId 时先查 getBooking 获取 groupId，再走 EditPreAdvise 流程
+    if (gateApptId) {
+      try {
+        var booking = await client.getBooking(container);
+        if (booking && booking.groupId) {
+          var editInfo = await client.loadEditPreAdvise(booking.gateApptId || booking.apptNo, booking.groupId);
+          // 日期格式转换
+          var dateStr = date;
+          if (dateStr.indexOf("/") === -1) {
+            var dp = dateStr.split("-");
+            if (dp.length === 3) dateStr = dp[1] + "/" + dp[2] + "/" + dp[0];
+          }
+          var rescheduleSlots = await client.getSlotsForReschedule(booking.gateApptId || booking.apptNo, editInfo, dateStr);
+          return res.json({ success: true, slots: rescheduleSlots, importInfo: editInfo });
+        }
+      } catch(e) {
+        console.log("[YTI /yti/slots] reschedule slot query failed, falling back to normal: " + e.message);
+      }
+    }
+
+    // 普通模式
     try {
       result = await client.getSlots(container, date, bookingType);
     } catch (e) {
