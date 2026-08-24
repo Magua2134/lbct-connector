@@ -266,6 +266,7 @@ class EModalClient extends TerminalClient {
     this.gatewayUrl = "https://termops.emodal.com/pregategateway/api/pregate/RouteToBreApi";
     this.identityUrl = "https://sso.emodal.com";
     this.apiMode = config.apiMode || "native"; // native | draydog
+    this.terminalCode = config.terminal_code || config.terminalCode || "LBCT";
     this.accessToken = "";
     this.refreshToken = "";
     this.draydogToken = "";
@@ -1422,7 +1423,7 @@ class EModalClient extends TerminalClient {
   async getSlotsByDate(targetDate, containerNo, gateApptId, targetTime) {
     if (this.apiMode === "draydog") {
       var params = new URLSearchParams();
-      params.set("terminal", "LBCT");
+      params.set("terminal", this.terminalCode);
       params.set("date", targetDate);
       var path = "/appointments/availability/" + encodeURIComponent(containerNo) + "/?" + params.toString();
       var data = await this.callDrayDog("GET", path);
@@ -1539,8 +1540,8 @@ class EModalClient extends TerminalClient {
 
     // Fallback: 尝试旧端点（兼容性）
     var candidates = [
-      { path: "/visitnextgen/GetAvailableSlots", type: "POST", data: { container: containerNo, containerNo: containerNo, facility: "LBCT", terminal: "LBCT", appointmentDate: targetDate, date: targetDate } },
-      { path: "/Visit/GetAvailableSlots", type: "POST", data: { containerNo: containerNo, container: containerNo, terminal: "LBCT", facility: "LBCT", date: targetDate, appointmentDate: targetDate } }
+      { path: "/visitnextgen/GetAvailableSlots", type: "POST", data: { container: containerNo, containerNo: containerNo, facility: this.terminalCode, terminal: this.terminalCode, appointmentDate: targetDate, date: targetDate } },
+      { path: "/Visit/GetAvailableSlots", type: "POST", data: { containerNo: containerNo, container: containerNo, terminal: this.terminalCode, facility: this.terminalCode, date: targetDate, appointmentDate: targetDate } }
     ];
 
     for (var ci = 0; ci < candidates.length; ci++) {
@@ -1569,7 +1570,7 @@ class EModalClient extends TerminalClient {
       var timeStr = s.window_start || s.start || s.time || s.slot || "";
       var tk = extractTime(timeStr);
       if (tk) {
-        slotMap[tk] = { slot: timeStr, id: String(s.id || tk), gate: "LBCT" };
+        slotMap[tk] = { slot: timeStr, id: String(s.id || tk), gate: this.terminalCode };
       }
     }
     return slotMap;
@@ -1608,7 +1609,7 @@ class EModalClient extends TerminalClient {
       var s = slots[i];
       if (typeof s === "string") {
         var tk1 = extractTime(s);
-        if (tk1) slotMap[tk1] = { slot: s, id: s, gate: "LBCT" };
+        if (tk1) slotMap[tk1] = { slot: s, id: s, gate: this.terminalCode };
         continue;
       }
       // 支持 camelCase 和 PascalCase 字段名 (.NET API 风格)
@@ -1619,7 +1620,7 @@ class EModalClient extends TerminalClient {
       if (tk2) {
         var id = s.id || s.Id || s.slotId || s.SlotId || s.slot_id || s.SlotID ||
           s.appointmentSlotId || s.AppointmentSlotId || s.gkey || s.GKEY || tk2;
-        var gate = s.gate || s.Gate || s.terminal || s.Terminal || s.facility || s.Facility || "LBCT";
+        var gate = s.gate || s.Gate || s.terminal || s.Terminal || s.facility || s.Facility || this.terminalCode;
         slotMap[tk2] = { slot: timeStr, id: String(id), gate: gate };
       }
     }
@@ -1651,7 +1652,7 @@ class EModalClient extends TerminalClient {
         slot: {
           window_start: time,
           window_end: time,
-          terminal: "LBCT",
+          terminal: this.terminalCode,
           container_number: container
         }
       };
@@ -2627,13 +2628,14 @@ async function getValidLbctClient(username, password, force) {
 const TOKEN_CACHE_TTL = 50 * 60 * 1000; // 50 minutes (EModal tokens expire in 1 hour)
 const tokenCache = new Map(); // Map<username, {accessToken, refreshToken, authCookie, expiresAt}>
 
-async function getValidClient(username, password, authCookie) {
+async function getValidClient(username, password, authCookie, terminal) {
   // Check cache first
   var cached = tokenCache.get(username);
   if (cached && cached.expiresAt > Date.now()) {
     // Try using cached token
     var client = new EModalClient({
       apiMode: 'native',
+      terminal_code: terminal === 'apl' ? 'FMS' : 'LBCT',
       password: cached.authCookie,
       token: cached.authCookie
     });
@@ -2645,6 +2647,7 @@ async function getValidClient(username, password, authCookie) {
   if (authCookie && authCookie.length > 20) {
     var cookieClient = new EModalClient({
       apiMode: 'native',
+      terminal_code: terminal === 'apl' ? 'FMS' : 'LBCT',
       password: authCookie,
       token: authCookie
     });
@@ -2685,6 +2688,7 @@ async function getValidClient(username, password, authCookie) {
 
   var freshClient = new EModalClient({
     apiMode: 'native',
+    terminal_code: terminal === 'apl' ? 'FMS' : 'LBCT',
     password: newAuthCookie,
     token: newAuthCookie
   });
@@ -2769,11 +2773,12 @@ app.post('/api/emodal/appointments', async function(req, res) {
   var username = req.body && req.body.username;
   var password = req.body && req.body.password;
   var authCookie = req.body && req.body.authCookie;
+  var terminal = req.body && req.body.terminal;
   if (!username || (!password && !authCookie)) {
     return res.status(400).json({ error: 'username and (password or authCookie) required' });
   }
   try {
-    var client = await getValidClient(username, password, authCookie);
+    var client = await getValidClient(username, password, authCookie, terminal);
     var result;
     var refreshedAuthCookie = null;
     try {
@@ -2782,7 +2787,7 @@ app.post('/api/emodal/appointments', async function(req, res) {
       // If token expired (401), force re-login with username+password
       if (e && e.code === 401) {
         tokenCache.delete(username);
-        client = await getValidClient(username, password, null);
+        client = await getValidClient(username, password, null, terminal);
         if (client._newAuthCookie) refreshedAuthCookie = client._newAuthCookie;
         result = await client.getAppointments();
       } else {
@@ -3119,6 +3124,7 @@ app.post('/api/emodal/slots', async function(req, res) {
   var authCookie = req.body && req.body.authCookie;
   var container = req.body && req.body.container;
   var date = req.body && req.body.date;
+  var terminal = req.body && req.body.terminal;
   if (!username || (!password && !authCookie)) {
     return res.status(400).json({ error: 'username and (password or authCookie) required' });
   }
@@ -3146,7 +3152,7 @@ app.post('/api/emodal/slots', async function(req, res) {
   }
   _emodalRateLimit.throttleMark(username);
   try {
-    var client = await getValidClient(username, password, authCookie);
+    var client = await getValidClient(username, password, authCookie, terminal);
     var result;
     var refreshedAuthCookie = null;
     try {
@@ -3156,7 +3162,7 @@ app.post('/api/emodal/slots', async function(req, res) {
         console.log('[EModal] /slots 401 token expired, force re-login with username+password');
         tokenCache.delete(username);
         // 不传authCookie，强制走用户名+密码重新登录路径
-        client = await getValidClient(username, password, null);
+        client = await getValidClient(username, password, null, terminal);
         if (client._newAuthCookie) refreshedAuthCookie = client._newAuthCookie;
         result = await client.getSlotsByDate(date, container, null, null);
       } else {
@@ -3277,7 +3283,7 @@ app.post('/api/emodal/book', async function(req, res) {
     return res.status(400).json({ error: 'container, date and time required' });
   }
   try {
-    var client = await getValidClient(username, password, authCookie);
+    var client = await getValidClient(username, password, authCookie, terminal);
     var options = {};
     if (existingApptId) {
       options.existingAppt = { gateApptId: existingApptId };
@@ -3290,7 +3296,7 @@ app.post('/api/emodal/book', async function(req, res) {
     } catch (e) {
       if (e && e.code === 401) {
         tokenCache.delete(username);
-        client = await getValidClient(username, password, null);
+        client = await getValidClient(username, password, null, terminal);
         if (client._newAuthCookie) refreshedAuthCookie = client._newAuthCookie;
         result = await client.createBooking(container, date, time, options);
       } else {
@@ -3310,6 +3316,7 @@ app.post('/api/emodal/cancel', async function(req, res) {
   var password = req.body && req.body.password;
   var authCookie = req.body && req.body.authCookie;
   var appointmentId = req.body && req.body.appointmentId;
+  var terminal = req.body && req.body.terminal;
   if (!username || (!password && !authCookie)) {
     return res.status(400).json({ error: 'username and (password or authCookie) required' });
   }
@@ -3317,7 +3324,7 @@ app.post('/api/emodal/cancel', async function(req, res) {
     return res.status(400).json({ error: 'appointmentId required' });
   }
   try {
-    var client = await getValidClient(username, password, authCookie);
+    var client = await getValidClient(username, password, authCookie, terminal);
     var result;
     var refreshedAuthCookie = null;
     try {
@@ -3325,7 +3332,7 @@ app.post('/api/emodal/cancel', async function(req, res) {
     } catch (e) {
       if (e && e.code === 401) {
         tokenCache.delete(username);
-        client = await getValidClient(username, password, null);
+        client = await getValidClient(username, password, null, terminal);
         if (client._newAuthCookie) refreshedAuthCookie = client._newAuthCookie;
         result = await client.cancelAppointment(appointmentId);
       } else {
