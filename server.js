@@ -4569,8 +4569,105 @@ class YTIConnectorClient {
           gateApptConId: 0,
           billOfLading: ""
         };
+      }      if (apptNoMatch) {
+        return {
+          apptNo: apptNoMatch[1],
+          gateApptId: apptNoMatch[1],
+          groupId: groupId,
+          transactionType: txType,
+          status: status,
+          appointmentTime: timeMatch ? (timeMatch[1] + " " + timeMatch[2]) : "",
+          origApptDate: origApptDate,
+          origApptDateTimeText: origApptDateTimeText,
+          moveType: moveType,
+          yardArea: yardArea,
+          sscoCode: sscoCode,
+          truckVisitApptId: 0,
+          gateApptConId: 0,
+          billOfLading: ""
+        };
       }
+
+      // ★ 回退：从 SaveImport 查询页面提取预约信息
+      console.log("[YTI] getBooking: Report page found no appt, trying searchImport fallback");
+      try {
+        var importInfo = await this.searchImport(containerNo);
+        if (importInfo && importInfo.html && importInfo.html.indexOf(containerNo) !== -1 && importInfo.html.indexOf("Edit") !== -1) {
+          var siHtml = importInfo.html;
+          
+          // 从 Edit 链接提取 GroupId 和 ApptId
+          var editMatch = siHtml.match(/Edit\?MoveType=([^&]+)&amp;GroupId=(\d+)&amp;ApptId=(\d+)/i)
+            || siHtml.match(/Edit\?MoveType=([^&]+)&GroupId=(\d+)&ApptId=(\d+)/i);
+          
+          var siApptId = "";
+          var siGroupId = "";
+          var siMoveType = moveType;
+          
+          if (editMatch) {
+            siMoveType = editMatch[1];
+            siGroupId = editMatch[2];
+            siApptId = editMatch[3];
+            console.log("[YTI] getBooking: found from Edit link: apptId=" + siApptId + ", groupId=" + siGroupId + ", moveType=" + siMoveType);
+          }
+          
+          // 也尝试直接匹配 apptId
+          if (!siApptId) {
+            var siApptMatch = siHtml.match(/apptId[=:]?\s*(\d+)/i);
+            if (siApptMatch) siApptId = siApptMatch[1];
+          }
+          if (!siGroupId) {
+            var siGroupMatch = siHtml.match(/GroupId[=:]?\s*(\d+)/i);
+            if (siGroupMatch) siGroupId = siGroupMatch[1];
+          }
+          
+          // 提取预约时间
+          var siTimeMatch = siHtml.match(/(\d{1,2}\/\d{1,2}\/\d{4})[\s\S]*?(\d{1,2}:\d{2})/i);
+          var siTimeRangeMatch = siHtml.match(/\b(\d{4}-\d{4})\b/);
+          var siDateMatches = siHtml.match(/\b(\d{1,2}\/\d{1,2}\/\d{4})\b/g);
+          var siOrigDate = siDateMatches && siDateMatches.length > 0 ? siDateMatches[0] : "";
+          var siOrigDateTimeText = "";
+          if (siTimeRangeMatch && siOrigDate) {
+            siOrigDateTimeText = siOrigDate + ' ' + siTimeRangeMatch[1];
+          } else if (siTimeMatch) {
+            siOrigDateTimeText = siTimeMatch[1] + ' ' + siTimeMatch[2];
+          }
+          
+          // 提取 YardArea
+          var siYardArea = yardArea;
+          var siYaMatch = siHtml.match(/appt-info-yard-area["'][^>]*>\s*([A-Z0-9\-]+)\s*</i);
+          if (siYaMatch) {
+            var yaShort = siYaMatch[1].match(/(\d+[A-Z])/);
+            siYardArea = yaShort ? yaShort[1] : siYaMatch[1];
+          }
+          
+          if (siApptId) {
+            console.log("[YTI] getBooking: found appt via searchImport fallback: apptId=" + siApptId + ", groupId=" + siGroupId);
+            return {
+              apptNo: siApptId,
+              gateApptId: siApptId,
+              groupId: siGroupId,
+              transactionType: "",
+              status: "",
+              appointmentTime: siTimeMatch ? (siTimeMatch[1] + " " + siTimeMatch[2]) : "",
+              origApptDate: siOrigDate,
+              origApptDateTimeText: siOrigDateTimeText,
+              moveType: siMoveType,
+              yardArea: siYardArea,
+              sscoCode: importInfo.sscoCode || "",
+              eqSizeType: importInfo.eqSizeType || "",
+              truckVisitApptId: 0,
+              gateApptConId: 0,
+              billOfLading: "",
+              _fromSearchImport: true
+            };
+          }
+        }
+      } catch (siErr) {
+        console.log("[YTI] getBooking: searchImport fallback failed: " + siErr.message);
+      }
+
       return null;
+
     } catch (e) {
       if (e.code === 401) throw e;
       return null;
