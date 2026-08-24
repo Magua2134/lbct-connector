@@ -4032,6 +4032,20 @@ class YTIConnectorClient {
     var hasExisting = existing && (existing.apptNo || existing.gateApptId);
     var hasGroupId = existing && existing.groupId;
 
+    // ★ groupId 缺失时从预约列表页回退查找
+    if (hasExisting && !hasGroupId) {
+      var fallbackApptId = existing.gateApptId || existing.apptNo;
+      console.log("[YTI] createBooking: groupId missing, trying findGroupIdFromList for apptId=" + fallbackApptId);
+      var fallbackGroupId = await this.findGroupIdFromList(fallbackApptId);
+      if (fallbackGroupId) {
+        existing.groupId = fallbackGroupId;
+        hasGroupId = true;
+        console.log("[YTI] createBooking: groupId found via fallback: " + fallbackGroupId);
+      } else {
+        console.log("[YTI] createBooking: groupId not found via fallback, will try SaveImport path");
+      }
+    }
+
     // ★ 改约模式：有 groupId 时走 EditPreAdvise → Reschedule 流程（精确复刻油猴脚本）
     if (hasExisting && hasGroupId) {
       var apptId = existing.gateApptId || existing.apptNo;
@@ -4449,6 +4463,45 @@ class YTIConnectorClient {
     } catch (e) {
       if (e.code === 401) throw e;
       return null;
+    }
+  }
+
+  // ★ 从预约列表页查找 groupId（getBooking 的回退方案）
+  async findGroupIdFromList(apptId) {
+    try {
+      var html = await this.call("GET", "/appointment/Appointment/Index?_=" + Date.now());
+      if (typeof html !== "string" || html.length === 0) return "";
+      console.log("[YTI] findGroupIdFromList: html length=" + html.length + ", contains EditPreAdvise=" + (html.indexOf("EditPreAdvise") !== -1));
+
+      // 在预约列表中查找包含 apptId 的 EditPreAdvise 链接
+      var patterns = [
+        new RegExp("EditPreAdvise\\?groupId=(\\d+)[&\\w]*apptId=" + apptId + "[^\\d]", "i"),
+        new RegExp("EditPreAdvise\\?groupId=(\\d+)&amp;apptId=" + apptId + "[^\\d]", "i"),
+        new RegExp("groupId=(\\d+)[^\\d]*?apptId=" + apptId, "i")
+      ];
+      for (var pi = 0; pi < patterns.length; pi++) {
+        var m = html.match(patterns[pi]);
+        if (m && m[1]) {
+          console.log("[YTI] findGroupIdFromList: found groupId=" + m[1] + " for apptId=" + apptId + " (pattern " + pi + ")");
+          return m[1];
+        }
+      }
+
+      // 回退：在 apptId 附近搜索 groupId
+      var apptIdx = html.indexOf("apptId=" + apptId);
+      if (apptIdx !== -1) {
+        var nearby = html.substring(Math.max(0, apptIdx - 300), apptIdx + 100);
+        var nearbyMatch = nearby.match(/groupId[=:"]?\s*(\d+)/i);
+        if (nearbyMatch && nearbyMatch[1]) {
+          console.log("[YTI] findGroupIdFromList: found groupId=" + nearbyMatch[1] + " near apptId=" + apptId);
+          return nearbyMatch[1];
+        }
+      }
+      console.log("[YTI] findGroupIdFromList: no groupId found for apptId=" + apptId);
+      return "";
+    } catch (e) {
+      console.log("[YTI] findGroupIdFromList error: " + (e.message || e));
+      return "";
     }
   }
 
