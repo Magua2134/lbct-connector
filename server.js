@@ -3891,7 +3891,8 @@ class YTIConnectorClient {
       eqSizeType: "",
       sscoCode: "",
       available: false,
-      rawHtml: html.slice(0, 5000)
+      rawHtml: html.slice(0, 5000),
+      html: html
     };
 
     var yardMatch = html.match(/yardarea\s*[=:]\s*["']?([^"'\s&]+)/i);
@@ -4608,6 +4609,16 @@ class YTIConnectorClient {
             siGroupId = editMatch[2];
             siApptId = editMatch[3];
             console.log("[YTI] getBooking: found from Edit link: apptId=" + siApptId + ", groupId=" + siGroupId + ", moveType=" + siMoveType);
+          }
+          
+          // 从隐藏 input 字段提取 GroupId（最可靠的方法）
+          if (!siGroupId) {
+            var hiddenGroupMatch = siHtml.match(/name=["']ContainerAppts\[0\]\.ApptInfo\.GroupId["'][^>]*value=["'](\d+)["']/i)
+              || siHtml.match(/ContainerAppts_0__ApptInfo_GroupId["'][^>]*value=["'](\d+)["']/i);
+            if (hiddenGroupMatch) {
+              siGroupId = hiddenGroupMatch[1];
+              console.log("[YTI] getBooking: groupId from hidden input: " + siGroupId);
+            }
           }
           
           // 也尝试直接匹配 apptId
