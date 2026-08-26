@@ -1081,6 +1081,14 @@ class EModalClient extends TerminalClient {
       if (!step2Fields.__RequestVerificationToken && step1Fields.__RequestVerificationToken) {
         step2Fields.__RequestVerificationToken = step1Fields.__RequestVerificationToken;
       }
+      // 提取密码页中的 Username 字段（text类型，非hidden，但服务器端必填）
+      var usernameInputMatch = passHtml.match(/<input[^>]*type=["']text["'][^>]*name=["'](Username)["'][^>]*value=["']([^"']*)["']/i);
+      if (usernameInputMatch && usernameInputMatch[2]) {
+        step2Fields.Username = decodeHtmlEntities(usernameInputMatch[2]);
+      } else if (!step2Fields.Username) {
+        // 兜底：直接用传入的 username
+        step2Fields.Username = username;
+      }
       var passInputMatch = passHtml.match(/<input[^>]*type=["']password["'][^>]*name=["']([^"']+)["']/i);
       var passFieldName = passInputMatch ? passInputMatch[1] : "Password";
       step2Fields[passFieldName] = password;
@@ -1676,7 +1684,7 @@ class EModalClient extends TerminalClient {
       }
     } catch (e) {}
 
-    var bookPayload = {
+    var basePayload = {
       "__type": "VisitNextGen.Models.ViewModels.VisitViewModel",
       "ContainerNbr": container,
       "Container": container,
@@ -1687,7 +1695,8 @@ class EModalClient extends TerminalClient {
       "SlotId": slotGateId || slotId,
       "WindowStart": time,
       "WindowEnd": time,
-      "Terminal": terminal || null,
+      "Terminal": this.terminalCode,
+      "IsEmpty": false,
       "GateApptId": (existing && existing.gateApptId) ? existing.gateApptId : null,
       "VisitId": (existing && existing.gateApptId) ? existing.gateApptId : null
     };
@@ -1696,7 +1705,7 @@ class EModalClient extends TerminalClient {
     if (existing && existing.gateApptId) {
       // 修改路径: 复用已有 visitId
       var aid = existing.gateApptId;
-      Object.assign(bookPayload, { VisitId: aid, GateApptId: aid, Id: aid });
+      Object.assign(basePayload, { VisitId: aid, GateApptId: aid, Id: aid });
       endpoints = [
         { path: "/visitnextgen/UpdateVisit", type: "POST" },
         { path: "/visitnextgen/SaveVisit", type: "POST" },
@@ -1715,36 +1724,71 @@ class EModalClient extends TerminalClient {
       ];
     }
 
+    // 尝试两种 IsExport 模式（进口=false, 出口=true）
+    // 满柜/空柜由 IsEmpty 控制，这里统一用 IsEmpty=false (满柜)
+    var exportModes = [false, true];
     var lastError = null;
-    for (var ei = 0; ei < endpoints.length; ei++) {
-      try {
-        var result2 = await this.callGateway(endpoints[ei].path, endpoints[ei].type, bookPayload);
-        if (result2) {
-          var ok = result2.success === true ||
-            result2.appointmentId || result2.visitId || result2.id ||
-            result2.gateApptId || result2.gateNbr ||
-            (result2.data && (result2.data.appointmentId || result2.data.visitId || result2.data.id || result2.data.gateApptId || result2.data.success === true)) ||
-            (result2.error === undefined && result2 !== null && typeof result2 !== 'string');
-          if (ok) {
-            var apptId = result2.appointmentId || result2.visitId || result2.id || result2.gateApptId || result2.gateNbr || "";
-            if (!apptId && result2.data) apptId = result2.data.appointmentId || result2.data.visitId || result2.data.id || result2.data.gateApptId || "";
-            return {
-              success: true,
-              apptNo: String(apptId),
-              time: time,
-              date: date,
-              timeSlot: time,
-              endpoint: endpoints[ei].path
-            };
+    var lastEndpoint = "";
+
+    for (var mi = 0; mi < exportModes.length; mi++) {
+      var isExport = exportModes[mi];
+      var bookPayload = Object.assign({}, basePayload, { IsExport: isExport });
+
+      for (var ei = 0; ei < endpoints.length; ei++) {
+        try {
+          var result2 = await this.callGateway(endpoints[ei].path, endpoints[ei].type, bookPayload);
+          lastEndpoint = endpoints[ei].path;
+          if (result2) {
+            var isSuccess = false;
+            var apptId = "";
+
+            // 明确的成功信号
+            if (result2.success === true || result2.Success === true) {
+              isSuccess = true;
+              apptId = result2.appointmentId || result2.visitId || result2.id || result2.gateApptId || result2.gateNbr || "";
+            }
+            // 返回了有效的预约 ID 且没有明确错误信息
+            else if (result2.appointmentId || result2.visitId || result2.id || result2.gateApptId || result2.gateNbr) {
+              apptId = result2.appointmentId || result2.visitId || result2.id || result2.gateApptId || result2.gateNbr || "";
+              if (apptId && String(apptId).length > 0 && !result2.error && !result2.Error && !result2.message && !result2.Message) {
+                isSuccess = true;
+              }
+            }
+            // data 嵌套结构里的成功
+            else if (result2.data && typeof result2.data === 'object') {
+              if (result2.data.success === true || result2.data.Success === true) {
+                isSuccess = true;
+              }
+              apptId = result2.data.appointmentId || result2.data.visitId || result2.data.id || result2.data.gateApptId || "";
+              if (apptId && !result2.data.error && !result2.data.Error) {
+                isSuccess = true;
+              }
+            }
+
+            if (isSuccess && apptId) {
+              console.log('[EModal] createBooking SUCCESS via ' + endpoints[ei].path + ' (IsExport=' + isExport + '), apptId=' + apptId);
+              return {
+                success: true,
+                apptNo: String(apptId),
+                time: time,
+                date: date,
+                timeSlot: time,
+                endpoint: endpoints[ei].path,
+                isExport: isExport
+              };
+            } else {
+              // 不是明确的成功，记录下来继续试下一个
+              console.log('[EModal] createBooking endpoint ' + endpoints[ei].path + ' (IsExport=' + isExport + ') returned non-success:', JSON.stringify(result2).slice(0, 300));
+            }
           }
+        } catch (e) {
+          console.error('[EModal] createBooking endpoint ' + endpoints[ei].path + ' (IsExport=' + isExport + ') error:', e.message || e);
+          lastError = e;
         }
-      } catch (e) {
-        console.error('[EModal] createBooking endpoint ' + endpoints[ei].path + ' error:', e.message || e);
-        lastError = e;
       }
     }
     if (lastError) throw lastError;
-    throw new Error("no_valid_endpoint");
+    throw new Error("no_valid_endpoint (last endpoint: " + lastEndpoint + ")");
   }
 
   async getAppointments() {
@@ -1845,6 +1889,28 @@ const lbctCookieCache = new Map();
 const LBCT_COOKIE_TTL = 7 * 60 * 60 * 1000; // 7小时 (LBCT 约 8 小时过期，提前1小时换)
 
 // ============================================
+// LBCT 登录互斥锁（防止并发重复登录消耗 2Captcha）
+// ============================================
+// Map<username, Promise<client>>  正在进行中的登录 Promise
+const lbctLoginInFlight = new Map();
+
+function waitForLogin(username) {
+  var p = lbctLoginInFlight.get(username);
+  if (p) return p; // 已经有登录在进行，等它的结果
+  return null;
+}
+
+function registerLoginStart(username, loginPromise) {
+  lbctLoginInFlight.set(username, loginPromise);
+  // 无论成功失败，完成后清除
+  loginPromise.catch(function() {}).then(function() {
+    if (lbctLoginInFlight.get(username) === loginPromise) {
+      lbctLoginInFlight.delete(username);
+    }
+  });
+}
+
+// ============================================
 // LBCT 2Captcha 登录熔断机制
 // 避免码头维护期间浪费大量2Captcha额度
 // ============================================
@@ -1883,13 +1949,20 @@ function getCircuitBreakerState(username) {
 
 function recordLoginFailure(username, errorMsg) {
   if (!username) return;
+  var lowErr = (errorMsg || "").toLowerCase();
+
+  // 2Captcha 限流错误：不计入失败计数，不触发熔断（这是第三方服务问题，不是账号/码头问题）
+  if (lowErr.indexOf("too many requests") !== -1 || lowErr.indexOf("rate limit") !== -1 || lowErr.indexOf("2captcha 限流") !== -1) {
+    console.log("[LBCT-CIRCUIT] SKIP (2Captcha rate limit), user=" + username + " error=" + (errorMsg || "").substring(0, 100));
+    return { failCount: 0, cooldownMs: 0, maintenanceFlag: false, skipped: true };
+  }
+
   var cb = lbctLoginCircuit.get(username) || { failCount: 0, cooldownUntil: 0, lastError: "", maintenanceFlag: false };
   cb.failCount = (cb.failCount || 0) + 1;
   cb.lastError = errorMsg || "";
 
   // 检测维护信号
   var isMaintenance = false;
-  var lowErr = (errorMsg || "").toLowerCase();
   var maintenanceKeywords = ["maintenance", "undergoing", "503", "service unavailable", "unavailable", "scheduled", "downtime", "website down", "web server is down", "origin_down", "error 521", "gateway timeout", "502", "504"];
   for (var i = 0; i < maintenanceKeywords.length; i++) {
     if (lowErr.indexOf(maintenanceKeywords[i]) !== -1) { isMaintenance = true; break; }
@@ -2584,42 +2657,62 @@ async function getValidLbctClient(username, password, force) {
     lbctCookieCache.delete(username);
   }
 
+  // ============== 第一步半：互斥锁检查（防止并发登录）==============
+  var inflight = waitForLogin(username);
+  if (inflight) {
+    console.log("[LBCT] 登录互斥锁命中: " + username + "，等待已有登录完成");
+    try {
+      var sharedClient = await inflight;
+      return sharedClient;
+    } catch (e) {
+      // 共享的登录失败了，不直接抛，继续往下自己尝试（或者让熔断接管）
+      console.log("[LBCT] 共享登录失败: " + username + "，继续自行检查");
+    }
+  }
+
   // ============== 第二步：熔断检查（如果维护中/连续失败多次，直接拒绝登录）==============
   // 注意：只有缓存失效需要重新登录时才检查熔断
   var cbState = checkCircuitBreaker(username);
 
   // ============== 第三步：需要重新登录（消耗1次2Captcha额度）==============
   console.log("[LBCT] Auto-login for user: " + username + " (2Captcha consumed, failCount=" + cbState.failCount + ")");
-  var loginResult;
-  try {
-    loginResult = await LBCTClientConnector.loginWithCredentials(username, password, twoCaptcha);
-  } catch(e) {
-    // 登录异常（网络错误/维护等）
-    recordLoginFailure(username, e.message || String(e));
-    throw e;
-  }
-  if (!loginResult.success) {
-    // 登录失败（2Captcha错误/账号密码错误/LBCT返回错误）
-    var errMsg = loginResult.error || "unknown";
-    recordLoginFailure(username, errMsg);
-    throw new Error("LBCT login failed: " + errMsg);
-  }
-  // 登录成功 → 重置失败计数
-  recordLoginSuccess(username);
-  // 写缓存（7小时有效，期间不用再登录）
-  lbctCookieCache.set(username, {
-    cookieStr: loginResult.cookie,
-    csrfToken: loginResult.csrfToken,
-    extractedCsrf: loginResult.extractedCsrf,
-    createdAt: loginResult.createdAt,
-    expiresAt: loginResult.expiresAt
-  });
-  return new LBCTClientConnector({
-    username, password,
-    cookie: loginResult.cookie,
-    csrfToken: loginResult.csrfToken,
-    extractedCsrf: loginResult.extractedCsrf
-  });
+
+  // 创建登录 Promise 并注册到互斥锁
+  var loginPromise = (async function() {
+    var loginResult;
+    try {
+      loginResult = await LBCTClientConnector.loginWithCredentials(username, password, twoCaptcha);
+    } catch(e) {
+      // 登录异常（网络错误/维护等）
+      recordLoginFailure(username, e.message || String(e));
+      throw e;
+    }
+    if (!loginResult.success) {
+      // 登录失败（2Captcha错误/账号密码错误/LBCT返回错误）
+      var errMsg = loginResult.error || "unknown";
+      recordLoginFailure(username, errMsg);
+      throw new Error("LBCT login failed: " + errMsg);
+    }
+    // 登录成功 → 重置失败计数
+    recordLoginSuccess(username);
+    // 写缓存（7小时有效，期间不用再登录）
+    lbctCookieCache.set(username, {
+      cookieStr: loginResult.cookie,
+      csrfToken: loginResult.csrfToken,
+      extractedCsrf: loginResult.extractedCsrf,
+      createdAt: loginResult.createdAt,
+      expiresAt: loginResult.expiresAt
+    });
+    return new LBCTClientConnector({
+      username, password,
+      cookie: loginResult.cookie,
+      csrfToken: loginResult.csrfToken,
+      extractedCsrf: loginResult.extractedCsrf
+    });
+  })();
+
+  registerLoginStart(username, loginPromise);
+  return loginPromise;
 }
 
 // ============================================
@@ -3399,6 +3492,7 @@ app.post('/lbct/validate', async function(req, res) {
 app.post('/lbct/appointments', async function(req, res) {
   var username = req.body && req.body.username;
   var password = req.body && req.body.password;
+  var reqCookie = (req.body && req.body.cookie) || "";
   if (!username || !password) return res.status(400).json({ error: 'username and password required' });
   try {
     var client = await getValidLbctClient(username, password, false);
@@ -3411,7 +3505,12 @@ app.post('/lbct/appointments', async function(req, res) {
         list = await client.getExistingAppointments();
       } else throw e;
     }
-    res.json({ success: true, appointments: list });
+    var resp = { success: true, appointments: list };
+    // 如果客户端的 cookie 和当前不一样，返回新 cookie（让 Worker 同步更新 DB）
+    if (client.cookieStr && client.cookieStr !== reqCookie) {
+      resp.lbctCookie = client.cookieStr;
+    }
+    res.json(resp);
   } catch (e) {
     var code = (e && e.code) || 500;
     res.status(code).json({ error: e.message || String(e) });
@@ -3425,6 +3524,7 @@ app.post('/lbct/slots', async function(req, res) {
   var container = req.body && req.body.container;
   var date = req.body && req.body.date;
   var bookingType = (req.body && req.body.bookingType) || "DI";
+  var reqCookie = (req.body && req.body.cookie) || "";
   if (!username || !password) return res.status(400).json({ connectorVersion: "V3-20260730b", error: 'username and password required' });
   if (!container || !date) return res.status(400).json({ connectorVersion: "V3-20260730b", error: 'container and date required' });
   try {
@@ -3469,6 +3569,10 @@ app.post('/lbct/slots', async function(req, res) {
         };
       }).slice(0, 50);  // 最多返回前50个
     }
+    // 如果客户端的 cookie 和当前不一样，返回新 cookie
+    if (client.cookieStr && client.cookieStr !== reqCookie) {
+      resp.lbctCookie = client.cookieStr;
+    }
     res.json(resp);
   } catch (e) {
     var code = (e && e.code) || 500;
@@ -3489,6 +3593,7 @@ app.post('/lbct/book', async function(req, res) {
   var time = req.body && req.body.time;
   var slotMap = req.body && req.body.slotMap;
   var bookingType = (req.body && req.body.bookingType) || "DI";
+  var reqCookie = (req.body && req.body.cookie) || "";
   if (!username || !password) return res.status(400).json({ error: 'username and password required' });
   if (!container || !date || !time) return res.status(400).json({ error: 'container, date and time required' });
   try {
@@ -3504,7 +3609,11 @@ app.post('/lbct/book', async function(req, res) {
         result = await client.createBooking(container, date, time, { slotMap: slots, bookingType: bookingType });
       } else throw e;
     }
-    res.json({ success: true, result: result });
+    var resp = { success: true, result: result };
+    if (client.cookieStr && client.cookieStr !== reqCookie) {
+      resp.lbctCookie = client.cookieStr;
+    }
+    res.json(resp);
   } catch (e) {
     var code = (e && e.code) || 500;
     res.status(code).json({ error: e.message || String(e) });

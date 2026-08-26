@@ -30,8 +30,9 @@ class TwoCaptchaClient {
   }
 
   // ========== 内部工具 ==========
-  async _request(path, params, method) {
+  async _request(path, params, method, _retryCount) {
     method = method || "GET";
+    _retryCount = _retryCount || 0;
     var url = this.apiUrl + path;
     var opts = {
       method: method,
@@ -50,10 +51,26 @@ class TwoCaptchaClient {
     }
     var r = await fetch(url, opts);
     var txt = await r.text();
+
+    // 处理 429 / Too Many Requests：指数退避重试（最多 3 次）
+    if ((r.status === 429 || txt.indexOf("Too Many Requests") !== -1) && _retryCount < 3) {
+      var waitMs = Math.pow(2, _retryCount) * 5000 + Math.floor(Math.random() * 2000);
+      console.log("[2Captcha] 限流 (retry " + (_retryCount + 1) + "/3)，等待 " + Math.round(waitMs/1000) + "s 后重试");
+      await sleep(waitMs);
+      return this._request(path, params, method, _retryCount + 1);
+    }
+
     try { return JSON.parse(txt); } catch (e) {
       // 兼容纯文本 RESPONSE_STYLE (旧 API 默认)
       if (txt.indexOf("ERROR") === 0 || txt.indexOf("OK") === 0 || txt.indexOf("CAPCHA") === 0) {
         return { status: txt.indexOf("OK") === 0 ? 1 : 0, request: txt };
+      }
+      // Too Many Requests 纯文本响应
+      if (txt.indexOf("Too Many Requests") !== -1) {
+        var err = new Error("2Captcha 限流: Too Many Requests (已重试3次)");
+        err.name = "TwoCaptchaRateLimitError";
+        err.isRateLimit = true;
+        throw err;
       }
       throw new Error("2Captcha 响应格式异常: " + txt.substring(0, 200));
     }
