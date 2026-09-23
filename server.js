@@ -27,6 +27,37 @@ if (typeof globalThis.crypto === 'undefined') {
 }
 
 // ============================================
+// 日志脱敏：所有诊断日志输出前统一处理
+// 脱敏 密码/Cookie/Token/Set-Cookie/Authorization/邮箱/柜号，并限制长度
+// 防止调试日志变成凭据泄露点（security hardening）
+// ============================================
+function scrubLog(text, maxLen) {
+  var s = String(text === undefined || text === null ? "" : text);
+  // 邮箱
+  s = s.replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, "***@***");
+  // Bearer / Authorization 头值
+  s = s.replace(/\b(Bearer|Authorization)\s+[A-Za-z0-9._\-+/=:]+/gi, "$1 ***");
+  // Authorization 字段（JSON "Authorization":"x" 或 Authorization=x）
+  s = s.replace(/\bAuthorization\s*["']?\s*[:=]\s*["']?[^"',;\s&}]+/gi, "Authorization=***");
+  // password / pwd / pass 字段值（兼容 JSON "key":"value" 与 key=value）
+  s = s.replace(/\b(password|pwd|pass)\s*["']?\s*[:=]\s*["']?[^"',;\s&}]+/gi, "$1=***");
+  // HTML 表单密码属性（<input name="Password" value="x">）
+  s = s.replace(/name\s*=\s*["'](?:password|pwd|pass)["'][^>]*?\bvalue\s*=\s*["']([^"']*)["']/gi, function(m, v) { return m.replace(v, "***"); });
+  // token 类字段值（__RequestVerificationToken / csrf / access_token / refresh_token / id_token / api key / camelCase 变体）
+  s = s.replace(/\b(__RequestVerificationToken|csrf(?:Token)?|access_token|refresh_token|auth_token|id_token|accessToken|authToken|refreshToken|idToken|api[_-]?key)\s*["']?\s*[:=]\s*["']?[^"',;\s&}]+/gi, "$1=***");
+  // cookie 字段/头值（JSON "cookieStr":"x" / cookieStr="xxx" / ASPXAUTH=xxx）
+  s = s.replace(/\b(cookieStr|cookie|ASPXAUTH|\.ASPXAUTH)\s*["']?\s*[:=]\s*["'][^"']*["']/gi, "$1=***");
+  s = s.replace(/\b(cookieStr|cookie|ASPXAUTH|\.ASPXAUTH)\s*[:=]\s*[^"',;\s&}]+/gi, "$1=***");
+  // Cookie / Set-Cookie 头（含 JSON "Set-Cookie":"..."）
+  s = s.replace(/\b(Cookie|Set-Cookie|set-cookie)\s*["']?\s*:\s*[^\r\n]+/g, "$1: ***");
+  // 柜号：4 字母 + 7 位数字（ISO 6346），保留字母前缀、数字掩码（大小写均可）
+  s = s.replace(/\b([A-Za-z]{4})\d{7}\b/g, function(m, p) { return p.toUpperCase() + "*******"; });
+  // 限制长度
+  if (maxLen > 0 && s.length > maxLen) s = s.substring(0, maxLen) + "...";
+  return s;
+}
+
+// ============================================
 // 全局 429 限流冷却机制
 // EModal API 一旦返回 429，在冷却期内拒绝所有新请求，避免请求叠加触发更严格的封禁
 // ============================================
@@ -341,7 +372,7 @@ class EModalClient extends TerminalClient {
     if (resp.status === 429) throw { code: 429, message: "rate_limited" };
     if (resp.status === 403) throw { code: 403, message: "HTTP 403: access_denied_by_waf_portal" };
     var text = await resp.text().catch(function() { return ""; });
-    if (!resp.ok) throw { code: resp.status, message: "HTTP " + resp.status + ": " + text.slice(0, 200) };
+    if (!resp.ok) throw { code: resp.status, message: "HTTP " + resp.status + ": " + scrubLog(text, 200) };
     try { return JSON.parse(text); } catch (e) { return text; }
   }
 
@@ -414,7 +445,7 @@ class EModalClient extends TerminalClient {
             return { _portal403: true, _status: resp2.status };
           }
           var txt2 = await resp2.text().catch(function() { return ""; });
-          if (!resp2.ok) throw { code: resp2.status, message: "HTTP " + resp2.status + ": " + txt2.slice(0, 200) };
+          if (!resp2.ok) throw { code: resp2.status, message: "HTTP " + resp2.status + ": " + scrubLog(txt2, 200) };
           try { return JSON.parse(txt2); } catch (e) { return txt2; }
         }
         throw { code: 401, message: "token_expired" };
@@ -435,7 +466,7 @@ class EModalClient extends TerminalClient {
         return { _portal403: true, _status: resp.status };
       }
       var txt = await resp.text().catch(function() { return ""; });
-      if (!resp.ok) throw { code: resp.status, message: "HTTP " + resp.status + ": " + txt.slice(0, 200) };
+      if (!resp.ok) throw { code: resp.status, message: "HTTP " + resp.status + ": " + scrubLog(txt, 200) };
       try { return JSON.parse(txt); } catch (e) { return txt; }
     }.bind(this);
 
@@ -504,12 +535,12 @@ class EModalClient extends TerminalClient {
             }
             if (resp3.status === 403) throw { code: 403, message: "HTTP 403: access_denied_by_waf" };
             var txt3 = await resp3.text().catch(function() { return ""; });
-            if (!resp3.ok) throw { code: resp3.status, message: "HTTP " + resp3.status + ": " + txt3.slice(0, 200) };
+            if (!resp3.ok) throw { code: resp3.status, message: "HTTP " + resp3.status + ": " + scrubLog(txt3, 200) };
             try { return JSON.parse(txt3); } catch (e) { return txt3; }
           }
           if (resp2.status === 403) throw { code: 403, message: "HTTP 403: access_denied_by_waf" };
           var txt2 = await resp2.text().catch(function() { return ""; });
-          if (!resp2.ok) throw { code: resp2.status, message: "HTTP " + resp2.status + ": " + txt2.slice(0, 200) };
+          if (!resp2.ok) throw { code: resp2.status, message: "HTTP " + resp2.status + ": " + scrubLog(txt2, 200) };
           try { return JSON.parse(txt2); } catch (e) { return txt2; }
         }
         throw { code: 401, message: "token_expired" };
@@ -531,12 +562,12 @@ class EModalClient extends TerminalClient {
         }
         if (resp4.status === 403) throw { code: 403, message: "HTTP 403: access_denied_by_waf" };
         var txt4 = await resp4.text().catch(function() { return ""; });
-        if (!resp4.ok) throw { code: resp4.status, message: "HTTP " + resp4.status + ": " + txt4.slice(0, 200) };
+        if (!resp4.ok) throw { code: resp4.status, message: "HTTP " + resp4.status + ": " + scrubLog(txt4, 200) };
         try { return JSON.parse(txt4); } catch (e) { return txt4; }
       }
       if (resp.status === 403) throw { code: 403, message: "HTTP 403: access_denied_by_waf" };
       var txt = await resp.text().catch(function() { return ""; });
-      if (!resp.ok) throw { code: resp.status, message: "HTTP " + resp.status + ": " + txt.slice(0, 200) };
+      if (!resp.ok) throw { code: resp.status, message: "HTTP " + resp.status + ": " + scrubLog(txt, 200) };
       try { return JSON.parse(txt); } catch (e) { return txt; }
     }.bind(this);
 
@@ -581,7 +612,7 @@ class EModalClient extends TerminalClient {
     if (resp.status === 429) throw { code: 429, message: "rate_limited" };
     if (!resp.ok) {
       var t = await resp.text().catch(function() { return ""; });
-      throw { code: resp.status, message: "HTTP " + resp.status + ": " + t.slice(0, 200) };
+      throw { code: resp.status, message: "HTTP " + resp.status + ": " + scrubLog(t, 200) };
     }
     try { return await resp.json(); } catch (e) { return await resp.text(); }
   }
@@ -602,7 +633,7 @@ class EModalClient extends TerminalClient {
     if (resp.status === 429) throw { code: 429, message: "rate_limited" };
     if (!resp.ok) {
       var t = await resp.text().catch(function() { return ""; });
-      throw { code: resp.status, message: "HTTP " + resp.status + ": " + t.slice(0, 200) };
+      throw { code: resp.status, message: "HTTP " + resp.status + ": " + scrubLog(t, 200) };
     }
     var ct = resp.headers.get("Content-Type") || "";
     if (ct.indexOf("json") !== -1) return await resp.json();
@@ -708,7 +739,7 @@ class EModalClient extends TerminalClient {
         var r = await fetch(url, fetchOpts);
         lastResp = r;
         lastStatus = r.status;
-        redirectTrace.push({ status: lastStatus, url: url.slice(0, 120) });
+        redirectTrace.push({ status: lastStatus, url: scrubLog(url, 120) });
         Object.assign(allCookies, extractCookies(r.headers));
 
         var loc = r.headers.get("Location");
@@ -851,7 +882,7 @@ class EModalClient extends TerminalClient {
       var s0b = await followRedirects(keycloakAuth);
       keycloakFinalHtml = s0b.body || "";
       if (!keycloakFinalHtml || keycloakFinalHtml.length < 100) {
-        var sn = keycloakFinalHtml.slice(0, 800);
+        var sn = scrubLog(keycloakFinalHtml, 800);
         return { success: false, reason: "Step0_FAIL s0.status=" + s0.status + " s0b.status=" + s0b.status +
           "\ns0_trace=" + JSON.stringify(s0.trace||[]) + "\ns0_final=" + s0.finalUrl +
           "\ns0b_trace=" + JSON.stringify(s0b.trace||[]) + "\ns0b_final=" + s0b.finalUrl +
@@ -1168,9 +1199,9 @@ class EModalClient extends TerminalClient {
       + (isAtKeycloak
           ? "kc_fields=" + JSON.stringify(kcFieldNames) + " kc_action=" + kcAction + "\n"
           : "s2_passFields=" + JSON.stringify(step2F) + " passFieldName=" + passF + "\n")
-      + "s3_HTML:\n" + s3Body.slice(0, 1500) + "\n"
-      + "s4_HTML:\n" + s4BodySafe.slice(0, 1000) + "\n"
-      + "passHtml:\n" + passHtml.slice(0, 1500);
+      + "s3_HTML:\n" + scrubLog(s3Body, 1500) + "\n"
+      + "s4_HTML:\n" + scrubLog(s4BodySafe, 1000) + "\n"
+      + "passHtml:\n" + scrubLog(passHtml, 1500);
 
     return { success: false, reason: finalDbg };
   }
@@ -1198,7 +1229,7 @@ class EModalClient extends TerminalClient {
 
     if (!tokenResp.ok) {
       var errText = await tokenResp.text().catch(function() { return ""; });
-      var dbg = "令牌交换失败: HTTP " + tokenResp.status + " " + errText.slice(0, 300) +
+      var dbg = "令牌交换失败: HTTP " + tokenResp.status + " " + scrubLog(errText, 300) +
         "\ncodeLen=" + codeClean.length +
         "\nverifierLen=" + (codeVerifier || "").length +
         "\nredirect_uri=" + redirectUri +
@@ -1344,7 +1375,7 @@ class EModalClient extends TerminalClient {
       console.log('[EModal] getBooking list length:', list.length, 'searching for container:', container);
       if (list.length > 0) {
         console.log('[EModal] getBooking first item keys:', Object.keys(list[0]).slice(0, 20).join(','));
-        console.log('[EModal] getBooking first item sample:', JSON.stringify(list[0]).slice(0, 800));
+        console.log('[EModal] getBooking first item sample:', scrubLog(JSON.stringify(list[0]), 800));
       }
 
       if (!list.length) return null;
@@ -1488,7 +1519,7 @@ class EModalClient extends TerminalClient {
 
       try {
         console.log('[EModal] getSlotsByDate attempt ' + (ei + 1) + ' (IsExport=' + exportOptions[ei] + ') calling /visitnextgen/GetAppointmentSlots');
-        console.log('[EModal] slotData:', JSON.stringify(slotData).slice(0, 400));
+        console.log('[EModal] slotData:', scrubLog(JSON.stringify(slotData), 400));
         var result = await this.callGateway("/visitnextgen/GetAppointmentSlots", "POST", slotData);
         // 保存原始 API 响应
         lastRawResult = result;
@@ -1497,7 +1528,7 @@ class EModalClient extends TerminalClient {
         if (result && typeof result === 'object' && !Array.isArray(result)) {
           console.log('[EModal] raw result keys:', Object.keys(result).slice(0, 20).join(','));
         }
-        console.log('[EModal] raw result sample:', JSON.stringify(result).slice(0, 1500));
+        console.log('[EModal] raw result sample:', scrubLog(JSON.stringify(result), 1500));
 
         var slots = this._extractSlots(result);
         console.log('[EModal] getSlotsByDate extracted slots count:', slots.length, '(IsExport=' + exportOptions[ei] + ')');
@@ -1778,7 +1809,7 @@ class EModalClient extends TerminalClient {
               };
             } else {
               // 不是明确的成功，记录下来继续试下一个
-              console.log('[EModal] createBooking endpoint ' + endpoints[ei].path + ' (IsExport=' + isExport + ') returned non-success:', JSON.stringify(result2).slice(0, 300));
+              console.log('[EModal] createBooking endpoint ' + endpoints[ei].path + ' (IsExport=' + isExport + ') returned non-success:', scrubLog(JSON.stringify(result2), 300));
             }
           }
         } catch (e) {
@@ -1953,7 +1984,7 @@ function recordLoginFailure(username, errorMsg) {
 
   // 2Captcha 限流错误：不计入失败计数，不触发熔断（这是第三方服务问题，不是账号/码头问题）
   if (lowErr.indexOf("too many requests") !== -1 || lowErr.indexOf("rate limit") !== -1 || lowErr.indexOf("2captcha 限流") !== -1) {
-    console.log("[LBCT-CIRCUIT] SKIP (2Captcha rate limit), user=" + username + " error=" + (errorMsg || "").substring(0, 100));
+    console.log("[LBCT-CIRCUIT] SKIP (2Captcha rate limit), user=" + username + " error=" + scrubLog(errorMsg || "", 100));
     return { failCount: 0, cooldownMs: 0, maintenanceFlag: false, skipped: true };
   }
 
@@ -1989,7 +2020,7 @@ function recordLoginFailure(username, errorMsg) {
   }
   lbctLoginCircuit.set(username, cb);
 
-  console.log("[LBCT-CIRCUIT] FAIL #" + cb.failCount + " user=" + username + " maintenance=" + isMaintenance + " cooldown=" + Math.round(cooldownMs / 1000) + "s error=" + (errorMsg || "").substring(0, 100));
+  console.log("[LBCT-CIRCUIT] FAIL #" + cb.failCount + " user=" + username + " maintenance=" + isMaintenance + " cooldown=" + Math.round(cooldownMs / 1000) + "s error=" + scrubLog(errorMsg || "", 100));
   return { failCount: cb.failCount, cooldownMs: cooldownMs, maintenanceFlag: isMaintenance };
 }
 
@@ -2004,7 +2035,7 @@ function checkCircuitBreaker(username) {
   if (state.active) {
     var min = Math.ceil(state.cooldownMs / 60000);
     var reason = state.maintenanceFlag ? "码头维护中" : "连续登录失败" + state.failCount + "次";
-    throw new Error("circuit_breaker: " + reason + "，" + min + "分钟后再试（最近错误：" + (state.lastError || "unknown").substring(0, 80) + "）");
+    throw new Error("circuit_breaker: " + reason + "，" + min + "分钟后再试（最近错误：" + scrubLog(state.lastError || "unknown", 80) + "）");
   }
   return state;
 }
@@ -2071,9 +2102,9 @@ class LBCTClientConnector {
     }
 
     var url = path.startsWith("http") ? path : this.baseUrl + path;
-    console.log("[LBCT] HTTP " + method + " " + url);
+    console.log("[LBCT] HTTP " + method + " " + scrubLog(url, 300));
     const resp = await fetch(url, opts);
-    console.log("[LBCT] HTTP " + method + " " + url + " → " + resp.status + " " + resp.statusText);
+    console.log("[LBCT] HTTP " + method + " " + scrubLog(url, 300) + " → " + resp.status + " " + resp.statusText);
     this._accumulateCookies(resp);
 
     // 手动跟随 301/302 重定向（最多5层）
@@ -2083,11 +2114,11 @@ class LBCTClientConnector {
       var loc = curResp.headers.get("Location");
       if (!loc) break;
       if (loc.startsWith("/")) loc = this.baseUrl + loc;
-      console.log("[LBCT] 🔄 Redirect " + resp.status + " → " + loc);
+      console.log("[LBCT] 🔄 Redirect " + resp.status + " → " + scrubLog(loc, 300));
       var rh = { "User-Agent": this.ua };
       if (this.cookieStr) rh["Cookie"] = this.cookieStr;
       curResp = await fetch(loc, { method: "GET", headers: rh, redirect: "manual" });
-      console.log("[LBCT] HTTP GET " + loc + " → " + curResp.status);
+      console.log("[LBCT] HTTP GET " + scrubLog(loc, 300) + " → " + curResp.status);
       this._accumulateCookies(curResp);
     }
 
@@ -2101,8 +2132,8 @@ class LBCTClientConnector {
     }
     if (!curResp.ok) {
       const txt = await curResp.text().catch(function(){ return ""; });
-      console.log("[LBCT] ❌ HTTP " + curResp.status + ": " + txt.slice(0, 200));
-      throw { code: curResp.status, message: "HTTP " + curResp.status + ": " + txt.slice(0, 300) };
+      console.log("[LBCT] ❌ HTTP " + curResp.status + ": " + scrubLog(txt, 300));
+      throw { code: curResp.status, message: "HTTP " + curResp.status + ": " + scrubLog(txt, 300) };
     }
 
     const ct = curResp.headers.get("Content-Type") || "";
@@ -2136,7 +2167,7 @@ class LBCTClientConnector {
       }.bind(this));
       var newLen = this.cookieStr ? this.cookieStr.length : 0;
       if (newLen !== oldLen) {
-        console.log("[LBCT] Cookie updated: " + oldLen + " -> " + newLen + " bytes, cookieStr=" + (this.cookieStr ? this.cookieStr.substring(0, 80) + "..." : "(empty)"));
+        console.log("[LBCT] Cookie updated: " + oldLen + " -> " + newLen + " bytes (content scrubbed)");
       }
     } catch(e) {
       console.error("[LBCT] _accumulateCookies ERROR:", e.message);
@@ -2277,9 +2308,9 @@ class LBCTClientConnector {
 
         var loginRespHtml = await client.call("POST", "/LoginWithUrl/MyList", formData, "form");
         console.log("[LBCT] Step3: POST login returned, cookie_len=" + client.cookieStr.length + ", status=seen in call()");
-        console.log("[LBCT] Step3: response preview: " + (typeof loginRespHtml === "string" ? loginRespHtml.substring(0, 200) : typeof loginRespHtml));
+        console.log("[LBCT] Step3: response preview: " + (typeof loginRespHtml === "string" ? scrubLog(loginRespHtml, 300) : typeof loginRespHtml));
         if (client.cookieStr) {
-          console.log("[LBCT] Step3: accumulated cookies: " + client.cookieStr.substring(0, 120) + (client.cookieStr.length > 120 ? "..." : ""));
+          console.log("[LBCT] Step3: accumulated cookies len=" + client.cookieStr.length + " (content scrubbed)");
         }
         if (typeof loginRespHtml === "string") {
           var lower = loginRespHtml.toLowerCase();
@@ -2295,7 +2326,7 @@ class LBCTClientConnector {
             // 提取具体的错误消息
             var errMatch = loginRespHtml.match(/<li[^>]*>([^<]+)<\/li>/);
             var errMsg = errMatch ? errMatch[1].trim() : "invalid username or password";
-            return { success: false, error: errMsg, html: loginRespHtml.slice(0,500) };
+            return { success: false, error: errMsg, html: scrubLog(loginRespHtml, 500) };
           }
         }
 
@@ -2307,7 +2338,8 @@ class LBCTClientConnector {
           if (captchaTaskId) {
             try { await captchaClient.reportBad(captchaTaskId); } catch(e) {}
           }
-          return { success: false, error: "login failed: cookie invalid after submit" };
+          var cReason = client.lastCookieInvalidReason || "cookie invalid";
+          return { success: false, error: "login failed: cookie invalid after submit [" + cReason + "]" };
         }
 
         // ---- 成功 ----
@@ -2336,16 +2368,18 @@ class LBCTClientConnector {
       console.log("[LBCT] validateCookie: GET /ViewMyList with cookie_len=" + (this.cookieStr ? this.cookieStr.length : 0));
       var html = await this.call("GET", "/ViewMyList");
       console.log("[LBCT] validateCookie: response type=" + typeof html + ", len=" + (typeof html === "string" ? html.length : 0));
-      if (typeof html !== "string") { console.log("[LBCT] validateCookie: response is not a string!"); return false; }
-      if (html.indexOf("LoginTimeout") !== -1) { console.log("[LBCT] validateCookie: ❌ LoginTimeout detected"); return false; }
-      if (html.indexOf("window.location.href") !== -1 && html.length < 1500) { console.log("[LBCT] validateCookie: ❌ redirect loop detected (window.location.href)"); return false; }
-      if (html.indexOf("LoginWithUrl/_returnUrl_") !== -1 && html.length < 1500) { console.log("[LBCT] validateCookie: ❌ redirected back to login"); return false; }
-      if (html.indexOf("loginBoxLogin") !== -1 && html.indexOf("g-recaptcha") !== -1) { console.log("[LBCT] validateCookie: ❌ still on login page with captcha"); return false; }
+      if (typeof html !== "string") { console.log("[LBCT] validateCookie: response is not a string!"); this.lastCookieInvalidReason = "response not a string"; return false; }
+      if (html.indexOf("LoginTimeout") !== -1) { console.log("[LBCT] validateCookie: ❌ LoginTimeout detected"); this.lastCookieInvalidReason = "LoginTimeout"; return false; }
+      if (html.indexOf("window.location.href") !== -1 && html.length < 1500) { console.log("[LBCT] validateCookie: ❌ redirect loop detected (window.location.href)"); this.lastCookieInvalidReason = "redirect loop"; return false; }
+      if (html.indexOf("LoginWithUrl/_returnUrl_") !== -1 && html.length < 1500) { console.log("[LBCT] validateCookie: ❌ redirected back to login"); this.lastCookieInvalidReason = "redirected back to login"; return false; }
+      if (html.indexOf("loginBoxLogin") !== -1 && html.indexOf("g-recaptcha") !== -1) { console.log("[LBCT] validateCookie: ❌ still on login page with captcha"); this.lastCookieInvalidReason = "still on login page with reCAPTCHA (login rejected)"; return false; }
       this.extractCsrf(html);
+      this.lastCookieInvalidReason = "";
       console.log("[LBCT] validateCookie: ✅ Cookie valid (html_len=" + html.length + ")");
       return true;
     } catch(e) {
       console.log("[LBCT] validateCookie: ❌ Exception:", e.message);
+      this.lastCookieInvalidReason = "exception: " + (e.message || String(e));
       return false;
     }
   }
@@ -2390,7 +2424,7 @@ class LBCTClientConnector {
         responseType: typeof result,
         responseKeys: result && typeof result === "object" ? Object.keys(result).slice(0, 15) : null,
         responseIsArray: Array.isArray(result),
-        responsePreview: JSON.stringify(result).substring(0, 500)
+        responsePreview: scrubLog(JSON.stringify(result), 500)
       };
 
       var slots = [];
@@ -2428,8 +2462,8 @@ class LBCTClientConnector {
 
       if (slots.length > 0) {
         console.log("[LBCT V3] first slot keys:", Object.keys(slots[0]));
-        console.log("[LBCT V3] first slot:", JSON.stringify(slots[0]).substring(0, 800));
-        if (slots.length > 1) console.log("[LBCT V3] last slot:", JSON.stringify(slots[slots.length - 1]).substring(0, 600));
+        console.log("[LBCT V3] first slot:", scrubLog(JSON.stringify(slots[0]), 800));
+        if (slots.length > 1) console.log("[LBCT V3] last slot:", scrubLog(JSON.stringify(slots[slots.length - 1]), 600));
         // 打印所有 slot 的日期和时间字段
         for (var di = 0; di < Math.min(slots.length, 10); di++) {
           var ds = slots[di];
@@ -2576,7 +2610,7 @@ class LBCTClientConnector {
       console.log("[LBCT V3] slotMap keys:", Object.keys(slotMap));
       return slotMap;
     } catch (e) {
-      console.error("[LBCT V3] getSlotsByDate ERROR:", e.message, String(e).substring(0, 500));
+      console.error("[LBCT V3] getSlotsByDate ERROR:", scrubLog(e.message, 500), scrubLog(String(e), 500));
       if (e.code === 401 || (e.message && e.message.indexOf("cookie_expired") !== -1)) throw e;
       throw new Error(e.message || String(e));
     }
@@ -2611,7 +2645,7 @@ class LBCTClientConnector {
         return { apptNo: m?m[1]:"N/A", time: date+" "+time, date, confirmed: true };
       }
       if (result.indexOf("Duplicate") !== -1 || result.indexOf("duplicate") !== -1) throw new Error("duplicate_appointment");
-      throw new Error("booking_failed: " + result.slice(0,200));
+      throw new Error("booking_failed: " + scrubLog(result, 200));
     }
     if (result && (result.success || result.Success)) {
       return { apptNo: result.AppointmentNo || result.apptNo || "N/A", time: date+" "+time, date, confirmed: true };
@@ -3028,7 +3062,7 @@ app.post('/api/emodal/debug-slots', async function(req, res) {
       results.push({
         test: "1-portal-direct-IsExport-false",
         status: resp1.status,
-        body: txt1.slice(0, 2000)
+        body: scrubLog(txt1, 2000)
       });
     } catch (e1) {
       results.push({ test: "1-portal-direct-IsExport-false", error: e1.message || String(e1) });
@@ -3054,7 +3088,7 @@ app.post('/api/emodal/debug-slots', async function(req, res) {
       results.push({
         test: "2-portal-direct-IsExport-true",
         status: resp2.status,
-        body: txt2.slice(0, 2000)
+        body: scrubLog(txt2, 2000)
       });
     } catch (e2) {
       results.push({ test: "2-portal-direct-IsExport-true", error: e2.message || String(e2) });
@@ -3083,7 +3117,7 @@ app.post('/api/emodal/debug-slots', async function(req, res) {
       results.push({
         test: "3-gateway-IsExport-false-with-type",
         status: resp3.status,
-        body: txt3.slice(0, 2000)
+        body: scrubLog(txt3, 2000)
       });
     } catch (e3) {
       results.push({ test: "3-gateway-IsExport-false-with-type", error: e3.message || String(e3) });
@@ -3114,7 +3148,7 @@ app.post('/api/emodal/debug-slots', async function(req, res) {
       results.push({
         test: "4-gateway-IsExport-false-no-type",
         status: resp4.status,
-        body: txt4.slice(0, 2000)
+        body: scrubLog(txt4, 2000)
       });
     } catch (e4) {
       results.push({ test: "4-gateway-IsExport-false-no-type", error: e4.message || String(e4) });
@@ -3143,7 +3177,7 @@ app.post('/api/emodal/debug-slots', async function(req, res) {
       results.push({
         test: "5-gateway-data-as-string",
         status: resp5.status,
-        body: txt5.slice(0, 2000)
+        body: scrubLog(txt5, 2000)
       });
     } catch (e5) {
       results.push({ test: "5-gateway-data-as-string", error: e5.message || String(e5) });
@@ -3169,7 +3203,7 @@ app.post('/api/emodal/debug-slots', async function(req, res) {
       results.push({
         test: "6-portal-direct-no-type-IsExport-false",
         status: resp6.status,
-        body: txt6.slice(0, 2000)
+        body: scrubLog(txt6, 2000)
       });
     } catch (e6) {
       results.push({ test: "6-portal-direct-no-type-IsExport-false", error: e6.message || String(e6) });
@@ -3198,7 +3232,7 @@ app.post('/api/emodal/debug-slots', async function(req, res) {
       results.push({
         test: "7-gateway-no-leading-slash",
         status: resp7.status,
-        body: txt7.slice(0, 2000)
+        body: scrubLog(txt7, 2000)
       });
     } catch (e7) {
       results.push({ test: "7-gateway-no-leading-slash", error: e7.message || String(e7) });
@@ -3304,16 +3338,16 @@ app.post('/api/emodal/slots', async function(req, res) {
       console.log('[EModal] rawSlotsResult type:', typeof rawSlotsResult, 'isArray:', Array.isArray(rawSlotsResult));
       if (rawSlotsResult && typeof rawSlotsResult === 'object') {
         console.log('[EModal] rawSlotsResult keys:', Object.keys(rawSlotsResult).slice(0, 20).join(','));
-        console.log('[EModal] rawSlotsResult sample:', JSON.stringify(rawSlotsResult).slice(0, 1500));
+        console.log('[EModal] rawSlotsResult sample:', scrubLog(JSON.stringify(rawSlotsResult), 1500));
       } else if (typeof rawSlotsResult === 'string') {
-        console.log('[EModal] rawSlotsResult is string:', rawSlotsResult.slice(0, 500));
+        console.log('[EModal] rawSlotsResult is string:', scrubLog(rawSlotsResult, 500));
       }
 
       // 方式1: 从 GetAppointmentSlots 的原始响应中提取已有预约信息
       if (rawSlotsResult && typeof rawSlotsResult === 'object') {
         var existingAppt = _extractExistingApptFromSlotsResult(rawSlotsResult, container);
         if (existingAppt) {
-          console.log('[EModal] Found existing appointment from slots result:', JSON.stringify(existingAppt).slice(0, 500));
+          console.log('[EModal] Found existing appointment from slots result:', scrubLog(JSON.stringify(existingAppt), 500));
           return res.json({ success: true, slots: [], hasExistingAppointment: true, existingAppointment: existingAppt, refreshedAuthCookie: refreshedAuthCookie });
         }
       }
@@ -3324,7 +3358,7 @@ app.post('/api/emodal/slots', async function(req, res) {
         console.log('[EModal] Trying getBooking (SearchMyAppointments) for container', container);
         var booking = await client.getBooking(container);
         if (booking && booking.gateApptId) {
-          console.log('[EModal] Found existing appointment via getBooking:', JSON.stringify(booking).slice(0, 500));
+          console.log('[EModal] Found existing appointment via getBooking:', scrubLog(JSON.stringify(booking), 500));
           var apptInfo = {
             id: booking.gateApptId || booking.truckVisitApptId || "",
             container: container,
@@ -3341,7 +3375,7 @@ app.post('/api/emodal/slots', async function(req, res) {
       }
 
       // 返回原始响应和错误信息用于调试
-      var debugInfo = rawSlotsResult ? JSON.stringify(rawSlotsResult).slice(0, 2000) : "null";
+      var debugInfo = rawSlotsResult ? scrubLog(JSON.stringify(rawSlotsResult), 2000) : "null";
       var errorMsg = "No slots found and no existing appointment detected";
       if (rawSlotsResult && rawSlotsResult._error) {
         errorMsg = "API Error: " + rawSlotsResult._error + " (code: " + (rawSlotsResult._code || 'N/A') + ")";
@@ -3551,9 +3585,9 @@ app.post('/lbct/slots', async function(req, res) {
     if (client._lastDebugInfo) resp.debugInfo = client._lastDebugInfo;
     if (client._lastRawResult !== undefined) {
       if (typeof client._lastRawResult === "string") {
-        resp.rawResponse = client._lastRawResult.substring(0, 3000);
+        resp.rawResponse = scrubLog(client._lastRawResult, 3000);
       } else {
-        resp.rawResponse = client._lastRawResult;
+        resp.rawResponse = scrubLog(JSON.stringify(client._lastRawResult), 3000);
       }
     }
     if (client._lastRawSlots) {
@@ -3926,7 +3960,7 @@ class YTIConnectorClient {
     if (resp.status === 429) throw { code: 429, message: "rate_limited" };
     if (!resp.ok && resp.status !== 302) {
       var errText = await resp.text().catch(function() { return ""; });
-      throw { code: resp.status, message: "HTTP " + resp.status + ": " + errText.slice(0, 500) };
+      throw { code: resp.status, message: "HTTP " + resp.status + ": " + scrubLog(errText, 500) };
     }
 
     var ct = resp.headers.get("Content-Type") || "";
@@ -4000,7 +4034,7 @@ class YTIConnectorClient {
       eqSizeType: "",
       sscoCode: "",
       available: false,
-      rawHtml: html.slice(0, 5000),
+      rawHtml: scrubLog(html, 5000),
       html: html
     };
 
@@ -4013,7 +4047,7 @@ class YTIConnectorClient {
     var vsMatch = html.match(/name=["']ContainerAppts\[0\]\.ViewStateString["'][^>]*value=(["'])([\s\S]*?)\1/i);
     if (!vsMatch) vsMatch = html.match(/value=(["'])([\s\S]*?)\1[^>]*name=["']ContainerAppts\[0\]\.ViewStateString["']/i);
     if (vsMatch) result.viewStateString = vsMatch[2];
-    console.log("[YTI] searchImport: container=" + containerNo + ", yardArea=" + result.yardArea + ", viewStateLen=" + (result.viewStateString || "").length + ", viewStatePreview=" + (result.viewStateString || "").slice(0, 150));
+    console.log("[YTI] searchImport: container=" + containerNo + ", yardArea=" + result.yardArea + ", viewStateLen=" + (result.viewStateString || "").length + ", viewStatePreview=" + scrubLog(result.viewStateString || "", 150));
 
     var dataYardMatch = html.match(/data-yardarea=["']([^"']+)["']/i);
     if (dataYardMatch && !result.yardArea) result.yardArea = dataYardMatch[1];
@@ -4131,7 +4165,7 @@ class YTIConnectorClient {
       }
     }
 
-    return { slots: slotMap, importInfo: importInfo, rawHtml: html.slice(0, 3000) };
+    return { slots: slotMap, importInfo: importInfo, rawHtml: scrubLog(html, 3000) };
   }
 
   async createBooking(container, date, time, options) {
@@ -4172,7 +4206,7 @@ class YTIConnectorClient {
       try {
         var editInfo = await this.loadEditPreAdvise(apptId, existing.groupId);
         var isLimitedPreAdvise = editInfo.yardArea && editInfo.slotQueryUrl && editInfo.slotQueryUrl.indexOf("LimitedPreAdvise") !== -1;
-        console.log("[YTI] createBooking: isLimitedPreAdvise=" + isLimitedPreAdvise + ", yardArea=" + editInfo.yardArea + ", slotUrl=" + (editInfo.slotQueryUrl || "").slice(0, 80));
+        console.log("[YTI] createBooking: isLimitedPreAdvise=" + isLimitedPreAdvise + ", yardArea=" + editInfo.yardArea + ", slotUrl=" + scrubLog(editInfo.slotQueryUrl || "", 80));
 
         if (isLimitedPreAdvise) {
           // ========== LimitedPreAdvise Reschedule 流程 ==========
@@ -4254,14 +4288,14 @@ class YTIConnectorClient {
               console.log("[YTI] reschedule likely SUCCESS (short response)");
               return { success: true, confirmed: true, apptNo: apptId, time: dateStr + " " + time, date: dateStr };
             }
-            throw new Error("reschedule_not_confirmed: " + rsResp.slice(0, 300));
+            throw new Error("reschedule_not_confirmed: " + scrubLog(rsResp, 300));
           }
 
           if (rsResp && typeof rsResp === "object") {
             if (rsResp.success || rsResp.Status === "success") {
               return { success: true, confirmed: true, apptNo: apptId, time: dateStr + " " + time, date: dateStr };
             }
-            throw new Error("reschedule_not_confirmed: " + (rsResp.message || rsResp.Message || JSON.stringify(rsResp).slice(0, 300)));
+            throw new Error("reschedule_not_confirmed: " + scrubLog(rsResp.message || rsResp.Message || JSON.stringify(rsResp), 300));
           }
 
           throw new Error("reschedule_not_confirmed: unknown response");
@@ -4371,14 +4405,14 @@ class YTIConnectorClient {
         if (jsAlertMatch) {
           throw new Error("edit_reschedule_failed: " + jsAlertMatch[1].trim());
         }
-        throw new Error("edit_reschedule_not_confirmed: " + editResp.slice(0, 300));
+        throw new Error("edit_reschedule_not_confirmed: " + scrubLog(editResp, 300));
       }
 
       if (editResp && typeof editResp === "object") {
         if (editResp.success || editResp.Status === "success") {
           return { success: true, confirmed: true, apptNo: editResp.AppointmentNumber || editResp.apptId || apptId, time: dateStr + " " + time, date: dateStr };
         }
-        throw new Error("edit_reschedule_not_confirmed: " + (editResp.message || editResp.Message || JSON.stringify(editResp).slice(0, 300)));
+        throw new Error("edit_reschedule_not_confirmed: " + scrubLog(editResp.message || editResp.Message || JSON.stringify(editResp), 300));
       }
 
       throw new Error("edit_reschedule_not_confirmed: unknown response");
@@ -4421,7 +4455,7 @@ class YTIConnectorClient {
     // 否则服务端校验失败并返回 HTTP 500
     console.log("[YTI] createBooking: container=" + container + ", date=" + dateStr + ", time=" + time);
     console.log("[YTI] createBooking: matchedSlot=", JSON.stringify({ id: matchedSlot.id, fullKey: matchedSlot.fullKey, availableCount: matchedSlot.availableCount, slot: matchedSlot.slot }));
-    console.log("[YTI] createBooking: raw viewStateString length=" + (viewStateString || "").length + ", preview=" + (viewStateString || "").slice(0, 200));
+    console.log("[YTI] createBooking: raw viewStateString length=" + (viewStateString || "").length + ", preview=" + scrubLog(viewStateString || "", 200));
 
     var updatedViewState = viewStateString;
     var vsParseOk = false;
@@ -4433,9 +4467,9 @@ class YTIConnectorClient {
         .replace(/&lt;/g, '<')
         .replace(/&gt;/g, '>')
         .replace(/&#39;/g, "'");
-      console.log("[YTI] ViewStateString decoded preview=" + decoded.slice(0, 200));
+      console.log("[YTI] ViewStateString decoded preview=" + scrubLog(decoded, 200));
       var vsObj = JSON.parse(decoded);
-      console.log("[YTI] ViewStateString parsed OK, keys=" + Object.keys(vsObj).join(",").slice(0, 200));
+      console.log("[YTI] ViewStateString parsed OK, keys=" + scrubLog(Object.keys(vsObj).join(","), 200));
       console.log("[YTI] VS before update: AvailableSlotCount=" + vsObj.AvailableSlotCount + ", TimeSlotKey=" + vsObj.TimeSlotKey + ", MoveType=" + vsObj.MoveType);
       // ★ 只更新 MoveType，不改 TimeSlotKey 和 AvailableSlotCount
       // 因为服务端会对比 view-state 中的 TimeSlotKey 和 NewTimeSlotKey 字段
@@ -4476,7 +4510,7 @@ class YTIConnectorClient {
     if (!vsParseOk) {
       console.log("[YTI] WARNING: ViewStateString was not updated, using raw value. This may cause HTTP 500.");
     }
-    console.log("[YTI] createBooking: final updatedViewState length=" + (updatedViewState || "").length + ", preview=" + (updatedViewState || "").slice(0, 200));
+    console.log("[YTI] createBooking: final updatedViewState length=" + (updatedViewState || "").length + ", preview=" + scrubLog(updatedViewState || "", 200));
 
     var fullSlotKey = matchedSlot.fullKey || matchedSlot.id;
 
@@ -4545,9 +4579,9 @@ class YTIConnectorClient {
       // ★ 增强错误诊断：把关键字段摘要附加到错误消息中
       var diag = "VS_len=" + (updatedViewState || "").length + ",VS_ok=" + vsParseOk + ",slotKey=" + fullSlotKey + ",slotId=" + matchedSlot.id + ",yardArea=" + yardArea + ",eqSize=" + (importInfo.eqSizeType || "45G1");
       var origMsg = callErr.message || JSON.stringify(callErr);
-      console.log("[YTI] SaveImport FAILED: " + origMsg.slice(0, 800) + " | DIAG: " + diag);
+      console.log("[YTI] SaveImport FAILED: " + scrubLog(origMsg, 800) + " | DIAG: " + diag);
       // 附加诊断信息到错误消息，用户在任务状态中可直接看到
-      throw { code: callErr.code || 500, message: origMsg + " [" + diag + "]" };
+      throw { code: callErr.code || 500, message: scrubLog(origMsg, 800) + " [" + diag + "]" };
     }
 
     if (typeof resp === "string") {
@@ -4557,14 +4591,14 @@ class YTIConnectorClient {
       }
       var errMatch = resp.match(/class=["']?error[^>]*>([^<]+)/i);
       if (errMatch) throw new Error("booking_not_confirmed: " + errMatch[1].trim());
-      throw new Error("booking_not_confirmed: " + resp.slice(0, 300));
+      throw new Error("booking_not_confirmed: " + scrubLog(resp, 300));
     }
 
     if (resp && typeof resp === "object") {
       if (resp.success || resp.Status === "success") {
         return { success: true, confirmed: true, apptNo: resp.AppointmentNumber || resp.apptId || "YTI_" + Date.now(), time: dateStr + " " + time, date: dateStr };
       }
-      throw new Error("booking_not_confirmed: " + (resp.message || resp.Message || JSON.stringify(resp).slice(0, 300)));
+      throw new Error("booking_not_confirmed: " + scrubLog(resp.message || resp.Message || JSON.stringify(resp), 300));
     }
 
     throw new Error("booking_not_confirmed: unknown response");
@@ -4622,7 +4656,7 @@ class YTIConnectorClient {
       // 方法5: EditPreAdvise 附近搜索
       if (!groupId && html.indexOf("EditPreAdvise") !== -1) {
         var editArea = html.substring(html.indexOf("EditPreAdvise"), html.indexOf("EditPreAdvise") + 200);
-        console.log("[YTI] getBooking: EditPreAdvise area: " + editArea.slice(0, 200));
+        console.log("[YTI] getBooking: EditPreAdvise area: " + scrubLog(editArea, 200));
         var anyGroupId = editArea.match(/groupId=(\d+)/i);
         if (anyGroupId) groupId = anyGroupId[1];
       }
@@ -5047,7 +5081,7 @@ class YTIConnectorClient {
     var slotUrlFullMatch = html.match(/data-update-url=["']([^"']+)["']/i);
     if (slotUrlFullMatch) {
       result.slotQueryUrl = slotUrlFullMatch[1].replace(/&amp;/g, '&').replace(/&#39;/g, "'");
-      console.log("[YTI] loadEditPreAdvise: slotQueryUrl=" + result.slotQueryUrl.slice(0, 200));
+      console.log("[YTI] loadEditPreAdvise: slotQueryUrl=" + scrubLog(result.slotQueryUrl, 200));
     }
 
     return result;
@@ -5076,7 +5110,7 @@ class YTIConnectorClient {
 
     slotUrl += params.join("&");
 
-    console.log("[YTI] getSlotsForReschedule: " + slotUrl.slice(0, 200));
+    console.log("[YTI] getSlotsForReschedule: " + scrubLog(slotUrl, 200));
     var html = await this.call("GET", slotUrl);
     if (typeof html !== "string") html = String(html);
 
@@ -5365,8 +5399,8 @@ app.post('/yti/debug', async function(req, res) {
         hiddenFields: hiddenFields,
         mainHiddenFields: mainHiddenFields,
         containerInputs: containerInputs,
-        mainHtmlPreview: mainHtml.substring(0, 2000),
-        searchHtmlPreview: searchHtml.substring(0, 2000),
+        mainHtmlPreview: scrubLog(mainHtml, 2000),
+        searchHtmlPreview: scrubLog(searchHtml, 2000),
         searchHtmlFull: searchHtml
       }
     });
