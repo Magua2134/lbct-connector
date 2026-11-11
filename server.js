@@ -4676,6 +4676,17 @@ class YTIConnectorClient {
       } else if (timeMatch) {
         origApptDateTimeText = origApptDate + ' ' + timeMatch[2];
       }
+      // 预约时间优先用 4 位时段区间（如 2000-2100 → 20:00）。
+      // 原实现用「页面第一个日期 + 其后第一个时间」的正则，页面其它 12:00 文本会被误当成预约时间
+      // （实测 TIIU5310298 / ONEU5332489 的真实夜间约都被解析成 11/11/2026 12:00）。
+      var _rangeStart = "";
+      if (timeRangeMatch) {
+        var _hm = String(timeRangeMatch[1]).match(/^(\d{2})(\d{2})-(\d{2})(\d{2})$/);
+        if (_hm) _rangeStart = _hm[1] + ":" + _hm[2];
+      }
+      var _apptTimeText = (origApptDate && _rangeStart)
+        ? (origApptDate + " " + _rangeStart)
+        : (timeMatch ? (timeMatch[1] + " " + timeMatch[2]) : "");
 
       // ★ 提取 MoveType 和 YardArea
       var moveType = "ImportsFullOut";
@@ -4705,7 +4716,7 @@ class YTIConnectorClient {
           groupId: groupId,
           transactionType: txType,
           status: status,
-          appointmentTime: timeMatch ? (timeMatch[1] + " " + timeMatch[2]) : "",
+          appointmentTime: _apptTimeText,
           origApptDate: origApptDate,
           origApptDateTimeText: origApptDateTimeText,
           moveType: moveType,
@@ -4722,7 +4733,7 @@ class YTIConnectorClient {
           groupId: groupId,
           transactionType: txType,
           status: status,
-          appointmentTime: timeMatch ? (timeMatch[1] + " " + timeMatch[2]) : "",
+          appointmentTime: _apptTimeText,
           origApptDate: origApptDate,
           origApptDateTimeText: origApptDateTimeText,
           moveType: moveType,
@@ -4787,6 +4798,15 @@ class YTIConnectorClient {
           } else if (siTimeMatch) {
             siOrigDateTimeText = siTimeMatch[1] + ' ' + siTimeMatch[2];
           }
+          // 与主路径一致：预约时间优先用 4 位时段区间，避免抓到页面其它 12:00 文本
+          var siRangeStart = "";
+          if (siTimeRangeMatch) {
+            var siHm = String(siTimeRangeMatch[1]).match(/^(\d{2})(\d{2})-(\d{2})(\d{2})$/);
+            if (siHm) siRangeStart = siHm[1] + ":" + siHm[2];
+          }
+          var siApptTimeText = (siOrigDate && siRangeStart)
+            ? (siOrigDate + " " + siRangeStart)
+            : (siTimeMatch ? (siTimeMatch[1] + " " + siTimeMatch[2]) : "");
           
           // 提取 YardArea
           var siYardArea = yardArea;
@@ -4804,7 +4824,7 @@ class YTIConnectorClient {
               groupId: siGroupId,
               transactionType: "",
               status: "",
-              appointmentTime: siTimeMatch ? (siTimeMatch[1] + " " + siTimeMatch[2]) : "",
+              appointmentTime: siApptTimeText,
               origApptDate: siOrigDate,
               origApptDateTimeText: siOrigDateTimeText,
               moveType: siMoveType,
