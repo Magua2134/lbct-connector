@@ -13,6 +13,7 @@ console.log('[TLS] NODE_TLS_REJECT_UNAUTHORIZED=0 (SSL certificate verification 
 
 const express = require('express');
 const cors = require('cors');
+const compression = require('compression');
 const https = require('https');
 
 // 2Captcha 客户端 (用于 LBCT reCAPTCHA v2 自动打码)
@@ -2828,6 +2829,7 @@ async function getValidClient(username, password, authCookie, terminal) {
 // Express Server
 // ============================================
 const app = express();
+app.use(compression());
 app.use(cors());
 app.use(express.json());
 
